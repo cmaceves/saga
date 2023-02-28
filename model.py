@@ -3,6 +3,7 @@ Functionality for running the model.
 """
 import os
 import sys
+import itertools
 import numpy as np
 import pandas as pd
 
@@ -89,8 +90,9 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
        
     problem_positions = file_util.parse_primer_mismatches(primer_mismatches) 
-    positions, frequency, nucs, low_depth_positions, reference_positions = file_utilparse_ivar_variants_file(
+    positions, frequency, nucs, low_depth_positions, reference_positions = file_util.parse_ivar_variants_file(
             variants_file, \
+            freq_precision, \
             problem_positions)
 
     new_frequencies = [round(x, freq_precision) for x in frequency if x > freq_lower_bound and x < freq_upper_bound]

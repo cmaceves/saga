@@ -121,7 +121,7 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
             continue
         if problem_positions is not None and int(p) in problem_positions:
             continue
-        
+       
         f = float(row['ALT_FREQ'])
         positions.append(p)
         frequency.append(round(f, frequency_precision))
