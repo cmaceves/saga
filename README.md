@@ -1,7 +1,7 @@
 # saga
 
 
-##Methods
+### Methods
 Files Required:
 
 (1) variants file
@@ -24,11 +24,11 @@ Once a model is selected, retrain it using more iterations and initializations, 
 
 Write the fasta file.    
 
-##How to run
+### How to run
 I've placed test data in the example_data directory (including freyja files). Comment out/in which example you'd like to look at in train_example and then just run.
 
 ```
 python train_example.py
 ```
 
-##Examples in train_example
+### Examples in train_example
