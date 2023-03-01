@@ -29,6 +29,7 @@ def generate_combinations(n, solution):
 def assign_clusters(frequencies, transformed_centers):
     #recalculate centers
     cluster_points = []
+    return_points = []
 
     for n in range(len(transformed_centers)):
         cluster_points.append([])
@@ -42,9 +43,11 @@ def assign_clusters(frequencies, transformed_centers):
             if dist < closest_value:
                 closest_value = dist
                 closest_index = i
+        if closest_value <= 0.05:
+            return_points.append(f)
         cluster_points[closest_index].append(f)
 
-    return(cluster_points)
+    return(cluster_points, return_points)
 
 def define_kde(frequencies, bw=0.01, round_decimal=3):
     x = np.array(frequencies)
@@ -233,8 +236,8 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     
     new_positions = [y for x,y in zip(frequency, positions) if x > freq_lower_bound and x < freq_upper_bound]
     new_nucs = [y for x,y in zip(frequency, nucs) if float(x) > freq_lower_bound and float(x) < freq_upper_bound]
-    universal_mutations = [str(x)+str(y) for (x,y,z) in zip(positions, nucs, frequency) if float(z) > freq_upper_bound]
-    
+    universal_mutations = [str(x)+str(y) for (x,y,z) in zip(positions, nucs, frequency) if float(z) > freq_upper_bound and str(y) != '0']
+   
     G = file_util.parse_physical_linkage_file(physical_linkage_file, new_positions, \
             new_frequencies, \
             new_nucs)
@@ -248,13 +251,14 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
 
     all_models = []
     all_model_scores = []
+    all_final_points = []
 
     #fit a model for each possible solution
     for i, solution in enumerate(new_solution_space):
         n = len(solution)
         combination_solutions, combination_sums = generate_combinations(n, solution)
-
-        clustered_data = assign_clusters(filter_freq_first, combination_sums)
+        
+        clustered_data, filtered_points_2 = assign_clusters(new_frequencies, combination_sums)
         final_points = []
         for cd, tp in zip(clustered_data, combination_sums):
             if len(cd) == 0 and tp in solution:
@@ -262,10 +266,12 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
             if len(cd) == 0:
                 continue
             final_points.append(tp)
-    
+
+        all_final_points.append(final_points)
         final_points_reshape = np.array(final_points).reshape(-1, 1)
         all_data_reshape = np.array(new_frequencies).reshape(-1, 1)
-        x_data = np.array(filter_freq_first).reshape(-1,1)
+
+        x_data = np.array(new_frequencies).reshape(-1,1)
         gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape) 
         gx.fit(x_data)
         labels = gx.predict(all_data_reshape)
@@ -275,20 +281,40 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         all_models.append(gx)
         
         #this is a weak point, need to be more emperical
+        #print(solution, "last data point", round(score_samples[0], 3), "lasta 3 data points", \
+        #        round(np.mean(score_samples[:3]), 3))
         all_model_scores.append(np.mean(score_samples[:3]))
-    
+   
+    #now that we've determine the best fit model overall, we retrain, eliminating points that are precarious
+    #which we assum belong to subpopulations
     lowest_score = max(all_model_scores)
     loc_best_model = all_model_scores.index(lowest_score)
-    best_model = all_models[loc_best_model]
-
     solution = new_solution_space[loc_best_model]
+    final_points = all_final_points[loc_best_model]
+   
 
+    #now we add in synthetic noise clusters
+    final_points_reshape = np.array(final_points).reshape(-1, 1)
+     
     combination_solutions, combination_sums = generate_combinations(len(solution), solution)
     
+    clustered_data, filtered_points_2 = assign_clusters(filter_freq_first, combination_sums)
+    x_data = np.array(filtered_points_2).reshape(-1,1)
+   
+    gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape) 
+    gx.fit(x_data)
+
+    labels = gx.predict(all_data_reshape)
+    score_samples = list(np.squeeze(gx.score_samples(all_data_reshape)))
+    means = [round(x,4) for x in list(np.squeeze(gx.means_))]
+    
+    print("final_points", final_points)
+    print("means", means) 
+    print("solution", solution)
+    #sys.exit(0)  
     hard_to_classify = []
     autoencoder_dict = {}
     frequency_dict = {}
-
     for s in solution:
         autoencoder_dict[s] = universal_mutations
         frequency_dict[s] = []
@@ -299,8 +325,9 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         location = (np.abs(arr - mean_label)).argmin()
         
         #this is also a weak point, need to find a way to exclude points in the first pass
-        if score < 0.75 and abs(combination_sums[location] - point) > 0.05:
-            print(combination_solutions[location], "point:", point, "score:" , round(score,3))
+        if score < -1000 and abs(mean_label - point) > 0.05:
+            print(combination_solutions[location], "sum:", combination_sums[location], \
+                    "point:", point, "score:" , round(score,3))
             hard_to_classify.append(point)
         else:
             for individual in combination_solutions[location]:
@@ -309,19 +336,16 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
                 check_var = str(new_nucs[variant_location]) + "_" + str(new_positions[variant_location])
                 if check_var in reference_positions:
                     continue
+                if str(new_nucs[variant_location]) == '0':
+                    continue
                 variant = str(new_positions[variant_location]) + str(new_nucs[variant_location])
                 autoencoder_dict[individual].append(variant)
-    
-    """
+
+    print(solution)
     tmp_dict = {"autoencoder_dict":autoencoder_dict, "frequency_dict":frequency_dict}
     with open(text_file, "a") as bfile:
         bfile.write(json.dumps(tmp_dict))
         bfile.write("\n")
-    """
-    #hard_classify_kde = get_kde(hard_to_classify, 0.1)  
-    #print(hard_classify_kde)
-    #sol = create_solution_space(hard_classify_kde, 2, max(solution))
-    #print(sol)
-
+    
 if __name__ == "__main__":
     main()
