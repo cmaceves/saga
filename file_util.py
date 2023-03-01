@@ -116,7 +116,7 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
         
         p = row['POS']
         n = row['ALT']
-        if int(row['TOTAL_DP']) < 100:
+        if int(row['TOTAL_DP']) < 50:
             low_depth_positions.append(str(n) + "_" + str(p))
             continue
         if problem_positions is not None and int(p) in problem_positions:
