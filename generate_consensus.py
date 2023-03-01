@@ -1,6 +1,30 @@
 import os
 import sys
 
+def sequence_analysis(output_name):
+    consensus = []
+    sequence = ""
+    with open(output_name, "r") as rfile:
+        for line in rfile:
+            line = line.strip()
+            if line.startswith(">"):
+                print(line)
+                if sequence != "":
+                    consensus.append(sequence)
+                    sequence = ""
+            else:
+                sequence += line
+
+    consensus.append(sequence)
+    for i in range(len(consensus[0])):
+        tmp = []
+        for j in range(len(consensus)):
+            tmp.append(consensus[j][i])
+        
+        if not all(x == tmp[0] for x in tmp):
+            print(tmp, i)
+            sys.exit(0)
+
 def write_fasta(autoencoder_dict, output_name, reference):
     ref_seq = ""
     with open(reference, "r") as rfile:

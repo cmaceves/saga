@@ -3,6 +3,7 @@ Functionality for running the model.
 """
 import os
 import sys
+import copy
 import json
 import itertools
 
@@ -237,7 +238,8 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     new_positions = [y for x,y in zip(frequency, positions) if x > freq_lower_bound and x < freq_upper_bound]
     new_nucs = [y for x,y in zip(frequency, nucs) if float(x) > freq_lower_bound and float(x) < freq_upper_bound]
     universal_mutations = [str(x)+str(y) for (x,y,z) in zip(positions, nucs, frequency) if float(z) > freq_upper_bound and str(y) != '0']
-   
+    print(len(universal_mutations), "universal mutations found")
+
     G = file_util.parse_physical_linkage_file(physical_linkage_file, new_positions, \
             new_frequencies, \
             new_nucs)
@@ -272,37 +274,32 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         all_data_reshape = np.array(new_frequencies).reshape(-1, 1)
 
         x_data = np.array(new_frequencies).reshape(-1,1)
-        gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape) 
+        gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape, \
+                max_iter=100, n_init=1, random_state=10) 
         gx.fit(x_data)
         labels = gx.predict(all_data_reshape)
         score_samples = list(np.squeeze(gx.score_samples(all_data_reshape)))
         score_samples.sort()
         means = [round(x,4) for x in list(np.squeeze(gx.means_))]
         all_models.append(gx)
-        
-        #this is a weak point, need to be more emperical
-        #print(solution, "last data point", round(score_samples[0], 3), "lasta 3 data points", \
-        #        round(np.mean(score_samples[:3]), 3))
-        all_model_scores.append(np.mean(score_samples[:3]))
+       
+        rough_lower_third = int(len(score_samples) / 4)
+        #HELPME: this is a weak point, need to be more emperical
+        all_model_scores.append(np.mean(score_samples[:rough_lower_third]))
    
-    #now that we've determine the best fit model overall, we retrain, eliminating points that are precarious
-    #which we assum belong to subpopulations
-    lowest_score = max(all_model_scores)
-    loc_best_model = all_model_scores.index(lowest_score)
+    
+    highest_score = max(all_model_scores)
+    loc_best_model = all_model_scores.index(highest_score)
     solution = new_solution_space[loc_best_model]
     final_points = all_final_points[loc_best_model]
    
-
-    #now we add in synthetic noise clusters
     final_points_reshape = np.array(final_points).reshape(-1, 1)
-     
     combination_solutions, combination_sums = generate_combinations(len(solution), solution)
     
-    clustered_data, filtered_points_2 = assign_clusters(filter_freq_first, combination_sums)
-    x_data = np.array(filtered_points_2).reshape(-1,1)
-   
-    gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape) 
-    gx.fit(x_data)
+    #retrain with higher number of iterations
+    gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape, \
+            n_init=100, max_iter=1000, random_state=10) 
+    gx.fit(all_data_reshape)
 
     labels = gx.predict(all_data_reshape)
     score_samples = list(np.squeeze(gx.score_samples(all_data_reshape)))
@@ -314,35 +311,33 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     #sys.exit(0)  
     hard_to_classify = []
     autoencoder_dict = {}
-    frequency_dict = {}
     for s in solution:
         autoencoder_dict[s] = universal_mutations
-        frequency_dict[s] = []
-
-    for label, point, score in zip(labels, new_frequencies, score_samples):
+    
+    for i, (label, point, score) in enumerate(zip(labels, new_frequencies, score_samples)):
         mean_label = means[label]
         arr = np.asarray(combination_sums)
         location = (np.abs(arr - mean_label)).argmin()
+       
+        nuc = str(new_nucs[i])
+        pos = str(new_positions[i])
         
-        #this is also a weak point, need to find a way to exclude points in the first pass
-        if score < -1000 and abs(mean_label - point) > 0.05:
-            print(combination_solutions[location], "sum:", combination_sums[location], \
-                    "point:", point, "score:" , round(score,3))
-            hard_to_classify.append(point)
-        else:
-            for individual in combination_solutions[location]:
-                frequency_dict[individual].append(point)
-                variant_location = new_frequencies.index(point)
-                check_var = str(new_nucs[variant_location]) + "_" + str(new_positions[variant_location])
-                if check_var in reference_positions:
-                    continue
-                if str(new_nucs[variant_location]) == '0':
-                    continue
-                variant = str(new_positions[variant_location]) + str(new_nucs[variant_location])
-                autoencoder_dict[individual].append(variant)
+        variant = pos+nuc
 
-    print(solution)
-    tmp_dict = {"autoencoder_dict":autoencoder_dict, "frequency_dict":frequency_dict}
+        if nuc == '0':
+            continue
+        
+        #print("combo sum:", arr[location], "mean:", mean_label, \
+        #        "point:", point, \
+        #        "combo solution:", \
+        #        combination_solutions[location], "var:", variant)
+ 
+        for individual in combination_solutions[location]:
+            tmp_list = copy.deepcopy(autoencoder_dict[individual])
+            tmp_list.append(variant)
+            autoencoder_dict[individual] = tmp_list
+
+    tmp_dict = {"autoencoder_dict":autoencoder_dict}
     with open(text_file, "a") as bfile:
         bfile.write(json.dumps(tmp_dict))
         bfile.write("\n")
