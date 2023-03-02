@@ -1,0 +1,2 @@
+lower_primer_name	suspect_positions
+covid19genome_200-29703_s20720_D_22F	22599_22599_22710_22710

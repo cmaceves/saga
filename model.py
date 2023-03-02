@@ -15,6 +15,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import KernelDensity
 
 import file_util
+import math_util
 
 def generate_combinations(n, solution):
     combination_solutions = []
@@ -107,7 +108,7 @@ def apply_physical_linkage(solution_space, G, kde_peaks, positions, nucs, freque
                 if count is None:
                     continue
                 
-                if int(count['count']) < 5:
+                if int(count['count']) < 3:
                     continue
                 
                 idx = (np.abs(arr - ov_freq)).argmin()
@@ -216,13 +217,16 @@ def create_solution_space(kde_peaks, n, total_value=1):
                 flat.append(os)
     return(flat)
 
-def run_model(variants_file, output_dir, output_name, primer_mismatches, physical_linkage_file=None):
+def run_model(variants_file, output_dir, output_name, primer_mismatches, physical_linkage_file=None, freyja_file=None):
     freq_lower_bound = 0.03
     freq_upper_bound = 0.97
     freq_precision = 4
     n_clusters = [3, 4, 5, 6] 
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
-       
+
+    if freyja_file is not None:
+        gt_centers, gt_lineages = file_util.parse_freyja_file(freyja_file)
+
     problem_positions = file_util.parse_primer_mismatches(primer_mismatches) 
     positions, frequency, nucs, low_depth_positions, reference_positions = file_util.parse_ivar_variants_file(
             variants_file, \
@@ -263,8 +267,6 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         clustered_data, filtered_points_2 = assign_clusters(new_frequencies, combination_sums)
         final_points = []
         for cd, tp in zip(clustered_data, combination_sums):
-            if len(cd) == 0 and tp in solution:
-                print("orphan")
             if len(cd) == 0:
                 continue
             final_points.append(tp)
@@ -277,22 +279,51 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape, \
                 max_iter=100, n_init=1, random_state=10) 
         gx.fit(x_data)
-        labels = gx.predict(all_data_reshape)
-        score_samples = list(np.squeeze(gx.score_samples(all_data_reshape)))
-        score_samples.sort()
-        means = [round(x,4) for x in list(np.squeeze(gx.means_))]
+        
+        mu = list(np.squeeze(gx.means_))
+        sigma = list(np.squeeze(gx.covariances_))
+        pi = list(np.squeeze(gx.weights_))
+        
+        cluster, likelihood, all_likelihoods = math_util.maximum_likelihood(mu, sigma, pi, new_frequencies)
+        sorted_likelihood = copy.deepcopy(likelihood)
+        sorted_likelihood.sort()
+
         all_models.append(gx)
        
-        rough_lower_third = int(len(score_samples) / 4)
         #HELPME: this is a weak point, need to be more emperical
-        all_model_scores.append(np.mean(score_samples[:rough_lower_third]))
-   
-    
-    highest_score = max(all_model_scores)
+        all_model_scores.append(sorted_likelihood[0])
+
+    #if we have it, let's use freyja info.
+    if freyja_file is None:
+        highest_score = max(all_model_scores)
+    else:
+        sorted_model_scores = copy.deepcopy(all_model_scores)
+        sorted_model_scores.sort(reverse=True)
+
+        for score in sorted_model_scores:
+            loc = all_model_scores.index(score)
+            tmp_sol = new_solution_space[loc]
+            valid = True
+            #handle the case where they're the same length 
+            if len(tmp_sol) == len(gt_centers):
+                gt_centers.sort(reverse=True)
+                tmp_sol.sort(reverse=True)
+                for g, t in zip(gt_centers, tmp_sol):
+                    if abs(g - t) > 0.05:
+                        valid = False
+                if valid is True:
+                    highest_score = score
+            if len(tmp_sol) != len(gt_centers):
+                print("You haven't tested this code yet.")
+                tmp_sol.sort(reverse=True)
+                gt_centers.sort(reverse=True)
+
+            if valid is True:
+                break
+
     loc_best_model = all_model_scores.index(highest_score)
     solution = new_solution_space[loc_best_model]
     final_points = all_final_points[loc_best_model]
-   
     final_points_reshape = np.array(final_points).reshape(-1, 1)
     combination_solutions, combination_sums = generate_combinations(len(solution), solution)
     
@@ -301,23 +332,23 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
             n_init=100, max_iter=1000, random_state=10) 
     gx.fit(all_data_reshape)
 
-    labels = gx.predict(all_data_reshape)
-    score_samples = list(np.squeeze(gx.score_samples(all_data_reshape)))
-    means = [round(x,4) for x in list(np.squeeze(gx.means_))]
+    mu = [round(x, 4) for x in list(np.squeeze(gx.means_))]
+    sigma = list(np.squeeze(gx.covariances_))
+    pi = list(np.squeeze(gx.weights_))
     
+    clusters, likelihood, all_likelihoods = math_util.maximum_likelihood(mu, sigma, pi, new_frequencies)
+   
     print("final_points", final_points)
-    print("means", means) 
+    print("means", mu) 
     print("solution", solution)
-    #sys.exit(0)  
     hard_to_classify = []
     autoencoder_dict = {}
     for s in solution:
         autoencoder_dict[s] = universal_mutations
     
-    for i, (label, point, score) in enumerate(zip(labels, new_frequencies, score_samples)):
-        mean_label = means[label]
+    for i, (cluster, point, score) in enumerate(zip(clusters, new_frequencies, likelihood)):
         arr = np.asarray(combination_sums)
-        location = (np.abs(arr - mean_label)).argmin()
+        location = (np.abs(arr - cluster)).argmin()
        
         nuc = str(new_nucs[i])
         pos = str(new_positions[i])

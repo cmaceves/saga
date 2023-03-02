@@ -5,6 +5,32 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 
+def parse_freyja_file(file_path, tolerance=0.95):
+    """
+    Open freyja results .tsv file and get the ground truth lineages and frequencies.
+    """
+    print("Parsing freyja file...")
+
+    actual_centers = []
+    actual_lineages = []
+
+    df = pd.read_table(file_path)
+    df.columns = ["attribute", "value"]
+    freyja_res = df.to_dict()
+    
+    lineages = freyja_res['value'][1].split(" ")
+    centers = freyja_res['value'][2].split(" ")
+    
+    total_accounted = 0
+    for l, c in zip(lineages, centers):
+        total_accounted += float(c)
+        if total_accounted > tolerance:
+            break
+        actual_centers.append(float(c))
+        actual_lineages.append(str(l))
+
+    return(actual_centers, actual_lineages)
+
 def parse_physical_linkage_file(filename, positions, frequencies, nucs):
     """
     Parameters
