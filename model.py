@@ -108,6 +108,7 @@ def apply_physical_linkage(solution_space, G, kde_peaks, positions, nucs, freque
                 if count is None:
                     continue
                 
+                #TODO: this should be a proportion of the reads covering this area
                 if int(count['count']) < 3:
                     continue
                 
@@ -277,7 +278,7 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
 
         x_data = np.array(new_frequencies).reshape(-1,1)
         gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape, \
-                max_iter=100, n_init=1, random_state=10) 
+                max_iter=100, n_init=50, random_state=10) 
         gx.fit(x_data)
         
         mu = list(np.squeeze(gx.means_))
@@ -291,9 +292,17 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         all_models.append(gx)
        
         #HELPME: this is a weak point, need to be more emperical
-        all_model_scores.append(sorted_likelihood[0])
+        all_model_scores.append(np.mean(sorted_likelihood[:3]))
 
-    #if we have it, let's use freyja info.
+    #TESTLINE
+    """
+    sorted_scores = copy.deepcopy(all_model_scores)
+    sorted_scores.sort(reverse=True)
+    for score in sorted_scores[:5]:
+        print(score)
+        print(new_solution_space[all_model_scores.index(score)])
+    """
+
     if freyja_file is None:
         highest_score = max(all_model_scores)
     else:
@@ -329,7 +338,7 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     
     #retrain with higher number of iterations
     gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape, \
-            n_init=100, max_iter=1000, random_state=10) 
+            n_init=200, max_iter=1000, random_state=10) 
     gx.fit(all_data_reshape)
 
     mu = [round(x, 4) for x in list(np.squeeze(gx.means_))]
@@ -355,6 +364,7 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         
         variant = pos+nuc
 
+        #this is true for the ref nucs 
         if nuc == '0':
             continue
         
@@ -369,6 +379,10 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
             autoencoder_dict[individual] = tmp_list
 
     tmp_dict = {"autoencoder_dict":autoencoder_dict}
+    """
+    for k, v in autoencoder_dict.items():
+        print(k, v[len(universal_mutations):])
+    """ 
     with open(text_file, "a") as bfile:
         bfile.write(json.dumps(tmp_dict))
         bfile.write("\n")

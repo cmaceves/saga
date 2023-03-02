@@ -2,6 +2,9 @@ import os
 import sys
 
 def sequence_analysis(output_name):
+    """
+    Auxilary function for playing with data.
+    """
     consensus = []
     sequence = ""
     with open(output_name, "r") as rfile:

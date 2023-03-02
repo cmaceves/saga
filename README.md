@@ -1,12 +1,18 @@
-# saga
+# Saga
 
+Tool for building consensus sequences from complex viral mixtures.
 
 ### Methods
+
+I've marked some HELPME and TODO lines in the file ```model.py```
+Deletions and insertions have not yet been handled.
+
 Files Required:
 
-(1) variants file
-(2) primer mismatch file
-(3) physical linkage text file (super basic, literally every linkage on a line)
+1. variants file
+2. primer mismatch file
+3. physical linkage text file (super basic, literally every linkage on a line)
+4. freyja file (optional but useful to resolve issues where pop1 + pop2 = pop3
 
 Essentially you parse the variants file and read in position/nuc/frequency, also using the frequency of the allele that matches the reference at positions where you have indels. Remove any nucleotides with frequencies likely modified due to primer binding errors.
 
