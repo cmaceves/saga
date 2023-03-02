@@ -11,11 +11,13 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 from networkx.algorithms.components import connected_components
-from sklearn.mixture import GaussianMixture
+from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
 from sklearn.neighbors import KernelDensity
 
 import file_util
 import math_util
+
+from gmm import GMM
 
 def generate_combinations(n, solution):
     combination_solutions = []
@@ -259,7 +261,9 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     all_models = []
     all_model_scores = []
     all_final_points = []
-
+    
+    print("solution space contains %s solutions..." %len(new_solution_space))
+    print("training models...")
     #fit a model for each possible solution
     for i, solution in enumerate(new_solution_space):
         n = len(solution)
@@ -277,10 +281,18 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         all_data_reshape = np.array(new_frequencies).reshape(-1, 1)
 
         x_data = np.array(new_frequencies).reshape(-1,1)
-        gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape, \
-                max_iter=100, n_init=50, random_state=10) 
-        gx.fit(x_data)
+
+        #gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape, \
+        #        max_iter=1000, n_init=1, random_state=10, init_params='k-means++') 
         
+        gx = GMM(n_components=len(final_points))
+        gx.fit(new_frequencies)
+        print(gx.mean_vector)
+        clusers = gx.predict(new_frequencies)
+        for c, f in zip(clusers, new_frequencies):
+            if c == 0:
+                print(c, f)
+        break
         mu = list(np.squeeze(gx.means_))
         sigma = list(np.squeeze(gx.covariances_))
         pi = list(np.squeeze(gx.weights_))
@@ -289,20 +301,19 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         sorted_likelihood = copy.deepcopy(likelihood)
         sorted_likelihood.sort()
 
-        all_models.append(gx)
-       
+    
+        #all_models.append(gx)
+      
         #HELPME: this is a weak point, need to be more emperical
-        all_model_scores.append(np.mean(sorted_likelihood[:3]))
-
+        #all_model_scores.append(sorted_likelihood[0])
+    sys.exit(0)
     #TESTLINE
-    """
     sorted_scores = copy.deepcopy(all_model_scores)
     sorted_scores.sort(reverse=True)
     for score in sorted_scores[:5]:
         print(score)
         print(new_solution_space[all_model_scores.index(score)])
-    """
-
+    
     if freyja_file is None:
         highest_score = max(all_model_scores)
     else:
@@ -326,6 +337,11 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
                 print("You haven't tested this code yet.")
                 tmp_sol.sort(reverse=True)
                 gt_centers.sort(reverse=True)
+                if tmp_sol[0] > gt_centers[0]:
+                    print("error in solution calling")
+                    highest_score = max(all_model_scores)
+                else:
+                    highest_score = max(all_model_scores)
 
             if valid is True:
                 break
@@ -338,7 +354,8 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     
     #retrain with higher number of iterations
     gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape, \
-            n_init=200, max_iter=1000, random_state=10) 
+            n_init=30, max_iter=1000, random_state=10) 
+    
     gx.fit(all_data_reshape)
 
     mu = [round(x, 4) for x in list(np.squeeze(gx.means_))]
@@ -346,7 +363,8 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     pi = list(np.squeeze(gx.weights_))
     
     clusters, likelihood, all_likelihoods = math_util.maximum_likelihood(mu, sigma, pi, new_frequencies)
-   
+    print("minimum likelihood", min(likelihood)) 
+    print("highest model score", highest_score)
     print("final_points", final_points)
     print("means", mu) 
     print("solution", solution)
@@ -378,7 +396,7 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
             tmp_list.append(variant)
             autoencoder_dict[individual] = tmp_list
 
-    tmp_dict = {"autoencoder_dict":autoencoder_dict}
+    tmp_dict = {"autoencoder_dict":autoencoder_dict, "score": min(likelihood)}
     """
     for k, v in autoencoder_dict.items():
         print(k, v[len(universal_mutations):])

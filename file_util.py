@@ -9,7 +9,7 @@ def parse_freyja_file(file_path, tolerance=0.95):
     """
     Open freyja results .tsv file and get the ground truth lineages and frequencies.
     """
-    print("Parsing freyja file...")
+    print("parsing freyja file...")
 
     actual_centers = []
     actual_lineages = []
