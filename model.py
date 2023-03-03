@@ -34,21 +34,15 @@ def assign_clusters(frequencies, transformed_centers):
     #recalculate centers
     cluster_points = []
     return_points = []
+    
+    arr = np.array(transformed_centers)
 
     for n in range(len(transformed_centers)):
         cluster_points.append([])
     
     #asign points to clusters and recalculate
     for f in frequencies:
-        closest_index = 0
-        closest_value = 1
-        for i,cc in enumerate(transformed_centers):
-            dist = abs(cc-f)
-            if dist < closest_value:
-                closest_value = dist
-                closest_index = i
-        if closest_value <= 0.05:
-            return_points.append(f)
+        closest_index = np.abs(arr-f).argmin()
         cluster_points[closest_index].append(f)
 
     return(cluster_points, return_points)
@@ -272,41 +266,44 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         clustered_data, filtered_points_2 = assign_clusters(new_frequencies, combination_sums)
         final_points = []
         for cd, tp in zip(clustered_data, combination_sums):
+            if tp >= 1:
+                continue
             if len(cd) == 0:
+                final_points.append(tp)
                 continue
             final_points.append(tp)
-
+            
         all_final_points.append(final_points)
         final_points_reshape = np.array(final_points).reshape(-1, 1)
         all_data_reshape = np.array(new_frequencies).reshape(-1, 1)
 
         x_data = np.array(new_frequencies).reshape(-1,1)
 
+        #sklean implementation
         #gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape, \
         #        max_iter=1000, n_init=1, random_state=10, init_params='k-means++') 
         
-        gx = GMM(n_components=len(final_points))
+        gx = GMM(n_components=len(final_points), mean_init=final_points)
         gx.fit(new_frequencies)
-        print(gx.mean_vector)
-        clusers = gx.predict(new_frequencies)
-        for c, f in zip(clusers, new_frequencies):
-            if c == 0:
-                print(c, f)
-        break
-        mu = list(np.squeeze(gx.means_))
-        sigma = list(np.squeeze(gx.covariances_))
-        pi = list(np.squeeze(gx.weights_))
+        likelihoods = gx.score(new_frequencies)
+        loc = likelihoods.index(min(likelihoods))
         
-        cluster, likelihood, all_likelihoods = math_util.maximum_likelihood(mu, sigma, pi, new_frequencies)
-        sorted_likelihood = copy.deepcopy(likelihood)
+        print(solution, min(likelihoods), new_frequencies[loc])
+        print(likelihoods)
+        #print(gx.mean_vector)
+        sorted_likelihood = copy.deepcopy(likelihoods)
         sorted_likelihood.sort()
-
-    
-        #all_models.append(gx)
+        
+        #print(sorted_likelihood[:3])
+        #print(gx.mean_vector)   
+        all_models.append(gx)
       
         #HELPME: this is a weak point, need to be more emperical
-        #all_model_scores.append(sorted_likelihood[0])
-    sys.exit(0)
+        if str(sorted_likelihood[0]) != 'nan':
+            all_model_scores.append(sorted_likelihood[0])
+        else:
+            all_model_scores.append(0)
+    
     #TESTLINE
     sorted_scores = copy.deepcopy(all_model_scores)
     sorted_scores.sort(reverse=True)
@@ -353,20 +350,14 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     combination_solutions, combination_sums = generate_combinations(len(solution), solution)
     
     #retrain with higher number of iterations
-    gx = GaussianMixture(n_components=len(final_points), means_init=final_points_reshape, \
-            n_init=30, max_iter=1000, random_state=10) 
-    
-    gx.fit(all_data_reshape)
+    gx = all_models[loc_best_model]
+    likelihood = gx.score(new_frequencies)
+    clusters = gx.predict(new_frequencies)  
 
-    mu = [round(x, 4) for x in list(np.squeeze(gx.means_))]
-    sigma = list(np.squeeze(gx.covariances_))
-    pi = list(np.squeeze(gx.weights_))
-    
-    clusters, likelihood, all_likelihoods = math_util.maximum_likelihood(mu, sigma, pi, new_frequencies)
     print("minimum likelihood", min(likelihood)) 
     print("highest model score", highest_score)
     print("final_points", final_points)
-    print("means", mu) 
+    print("means", gx.mean_vector) 
     print("solution", solution)
     hard_to_classify = []
     autoencoder_dict = {}
