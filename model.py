@@ -26,8 +26,10 @@ def generate_combinations(n, solution):
         for subset in itertools.combinations(solution, L):
             if len(subset) < 1:
                 continue
+            
+            sum_val = round(sum(subset),4)
             combination_solutions.append(list(subset))
-            combination_sums.append(round(sum(subset),4))
+            combination_sums.append(sum_val)
     return(combination_solutions, combination_sums)
 
 def assign_clusters(frequencies, transformed_centers):
@@ -47,7 +49,7 @@ def assign_clusters(frequencies, transformed_centers):
 
     return(cluster_points, return_points)
 
-def define_kde(frequencies, bw=0.01, round_decimal=3):
+def define_kde(frequencies, bw=0.001, round_decimal=4):
     x = np.array(frequencies)
     x_full = x.reshape(-1, 1)
     eval_points = np.linspace(np.min(x_full), np.max(x_full))
@@ -218,11 +220,16 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     freq_lower_bound = 0.03
     freq_upper_bound = 0.97
     freq_precision = 4
-    n_clusters = [3, 4, 5, 6] 
+    n_clusters = [3, 4, 5, 6, 7, 8] 
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
 
     if freyja_file is not None:
         gt_centers, gt_lineages = file_util.parse_freyja_file(freyja_file)
+        #if we have < 97% coverage in the first 8 clusters not even bother trying
+        if sum(gt_centers[:8]) < 0.97:
+            print(sum(gt_centers[:8]))
+            print(gt_centers[:8])
+            return(1)
 
     problem_positions = file_util.parse_primer_mismatches(primer_mismatches) 
     positions, frequency, nucs, low_depth_positions, reference_positions = file_util.parse_ivar_variants_file(
@@ -233,6 +240,8 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     new_frequencies = [round(x, freq_precision) for x in frequency if x > freq_lower_bound and x < freq_upper_bound]
     solution_space = [] 
     kde_peaks = define_kde(new_frequencies)
+    #print(kde_peaks)
+    #sys.exit(0)
     for n in n_clusters:
         solution_space.extend(create_solution_space(kde_peaks, n))    
     
@@ -244,29 +253,30 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     G = file_util.parse_physical_linkage_file(physical_linkage_file, new_positions, \
             new_frequencies, \
             new_nucs)
-
     new_solution_space, frequencies_remove = apply_physical_linkage(solution_space, \
             G, \
             kde_peaks, \
             new_positions, new_nucs, new_frequencies)
-
+   
     filter_freq_first = [x for x in new_frequencies if x not in frequencies_remove]    
 
     all_models = []
     all_model_scores = []
     all_final_points = []
     
+    #TESTLINE
+    #new_solution_space = [x for x in new_solution_space if len(x) == 5 and 0.3753 in x and 0.2986 in x]
+
     print("solution space contains %s solutions..." %len(new_solution_space))
     print("training models...")
     #fit a model for each possible solution
     for i, solution in enumerate(new_solution_space):
         n = len(solution)
-        combination_solutions, combination_sums = generate_combinations(n, solution)
-        
+        combination_solutions, combination_sums = generate_combinations(n, solution)        
         clustered_data, filtered_points_2 = assign_clusters(new_frequencies, combination_sums)
         final_points = []
         for cd, tp in zip(clustered_data, combination_sums):
-            if tp >= 1:
+            if tp >= 1.03:
                 continue
             if len(cd) == 0:
                 final_points.append(tp)
@@ -285,32 +295,34 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         
         gx = GMM(n_components=len(final_points), mean_init=final_points)
         gx.fit(new_frequencies)
-        likelihoods = gx.score(new_frequencies)
+        likelihoods, all_likelihoods = gx.score(new_frequencies)
         loc = likelihoods.index(min(likelihoods))
         
-        print(solution, min(likelihoods), new_frequencies[loc])
-        print(likelihoods)
+        print("solution", solution, min(likelihoods), new_frequencies[loc])
+        #print("mean:", gx.mean_vector)
         #print(gx.mean_vector)
         sorted_likelihood = copy.deepcopy(likelihoods)
         sorted_likelihood.sort()
+        clusters = gx.predict(new_frequencies)  
+        dists = []
         
+        """ 
+        for n, x, l, al  in zip(new_frequencies, clusters, likelihoods, all_likelihoods):
+            if abs(n-x) > 0.10 or l < 1e-100:
+                print("point:", n, "cluster:", x, round(abs(n-x), 3), "likelihood:", l, "all_likelihoods:", al)
+        """
         #print(sorted_likelihood[:3])
         #print(gx.mean_vector)   
         all_models.append(gx)
-      
         #HELPME: this is a weak point, need to be more emperical
         if str(sorted_likelihood[0]) != 'nan':
             all_model_scores.append(sorted_likelihood[0])
         else:
             all_model_scores.append(0)
-    
     #TESTLINE
     sorted_scores = copy.deepcopy(all_model_scores)
     sorted_scores.sort(reverse=True)
-    for score in sorted_scores[:5]:
-        print(score)
-        print(new_solution_space[all_model_scores.index(score)])
-    
+   
     if freyja_file is None:
         highest_score = max(all_model_scores)
     else:
@@ -351,9 +363,8 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     
     #retrain with higher number of iterations
     gx = all_models[loc_best_model]
-    likelihood = gx.score(new_frequencies)
+    likelihood, all_likelihoods  = gx.score(new_frequencies)
     clusters = gx.predict(new_frequencies)  
-
     print("minimum likelihood", min(likelihood)) 
     print("highest model score", highest_score)
     print("final_points", final_points)
@@ -363,7 +374,6 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     autoencoder_dict = {}
     for s in solution:
         autoencoder_dict[s] = universal_mutations
-    
     for i, (cluster, point, score) in enumerate(zip(clusters, new_frequencies, likelihood)):
         arr = np.asarray(combination_sums)
         location = (np.abs(arr - cluster)).argmin()
@@ -396,5 +406,7 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         bfile.write(json.dumps(tmp_dict))
         bfile.write("\n")
     
+    return(0)
+
 if __name__ == "__main__":
     main()

@@ -1,4 +1,6 @@
+import os
 import sys
+import math
 import numpy as np
 import pandas as pd
 from math_util import maximum_likelihood
@@ -38,14 +40,22 @@ class GMM:
                     The 2-d matrix that contain the covariances for the features
         '''
         term1 = (2 * np.pi * covariance_matrix) ** (-0.5) 
-        term2 = -0.5 * ((X - mean_vector)**2) * (1/covariance_matrix)
+        #term2 = -0.5 * ((X - mean_vector)**2) * (1/covariance_matrix)
         #term1 = (1 * np.pi * covariance_matrix) ** (-0.5) 
        
         #if this term is larger, then the likelihood is larger
         #this is negative, therefore we want abs() to be smaller
         #change constance to place larger burden on linear closeness
-        #term2 = -1 * ((X - mean_vector)**2) * (1/covariance_matrix)
-        
+        #handle the case where X == mean
+        if X != mean_vector:
+            term2 = -0.75 * ((X - mean_vector)**2) * (1/covariance_matrix)
+        else:
+            term2 = -0.75 * ((0.00001)**2) * (1/covariance_matrix)
+
+        if str(term1 * np.exp(term2)) == 'nan':
+            print("cov:", covariance_matrix, "x:", X, "mean_vector:", mean_vector)
+            print("term1:", term1, "term2:", term2)
+            sys.exit(1)
         return(term1 * np.exp(term2))
     
     def _kmeans_init(self, X, mean_vector):
@@ -60,16 +70,19 @@ class GMM:
         for x in X:
             location = (np.abs(arr - x)).argmin()
             clusters[location].append(x)        
-        self.covariance_matrixes = [float(np.cov(x)) if len(x) > 1 else 0.0001 for x in clusters]
+        self.covariance_matrixes = [float(np.cov(x)) if len(x) > 1 else 0.00001 for x in clusters]
+        self.covariance_matrixes = [x if x > 0 else 0.00001 for x in self.covariance_matrixes]
 
     def fit(self, X):       
         self._kmeans_init(X, self.mean_vector)
         for iteration in range(self.max_iter):
-            """ 
+            
+            """
             print("mean:", self.mean_vector)
             print("pi:", self.pi)
-            print("cov:", self.covariance_matrixes)
+            print("cov top:", self.covariance_matrixes)
             """
+            
             ''' --------------------------   E - STEP   -------------------------- '''
             # Initiating the r matrix, evrey row contains the probabilities
             # for every cluster for this row
@@ -84,11 +97,12 @@ class GMM:
                     self.r[n][k] /= sum([self.pi[j]*self.multivariate_normal(X[n], self.mean_vector[j], self.covariance_matrixes[j]) for j in range(self.n_componets)])
                     """
                     self.r[n][k] = self.multivariate_normal(X[n], self.mean_vector[k], self.covariance_matrixes[k])
-                    self.r[n][k] /= sum([self.multivariate_normal(X[n], self.mean_vector[j], self.covariance_matrixes[j]) for j in range(self.n_componets)])
-                    
-                    #print(self.r[n][k], self.covariance_matrixes[k])
+                    all_values = [self.multivariate_normal(X[n], self.mean_vector[j], self.covariance_matrixes[j]) for j in range(self.n_componets)]
+                    #if str(self.r[n][k]) == 'nan' or all(x == 0 for x in all_values):
+                    #    print(self.r[n][k], all_values, "point", X[n], k)
+                    self.r[n][k] /= sum(all_values)
+                     
                 
-                #print(self.r[n], X[n])
                 probas.append(max(self.r[n][:]))
                 all_probas.append(list(self.r[n]))
             #print("min:", min(probas))
@@ -99,7 +113,6 @@ class GMM:
             N = np.sum(self.r, axis=0)
             #print("iteration:", iteration)
             #print("N:", list(N))
-            #print(list(self.covariance_matrixes))
             #print("mean:", self.mean_vector)
             #print("pi:", self.pi)
             ''' --------------------------   M - STEP   -------------------------- '''
@@ -126,7 +139,9 @@ class GMM:
                     weight = self.r[:,k]
                 self.covariance_matrixes[k] = float(np.cov(X, aweights=(weight), ddof=0))
             self.covariance_matrixes = [1/N[k]*self.covariance_matrixes[k] for k in range(self.n_componets)]
-                        
+            self.covariance_matrixes = [x if x != 0 else 0.00001 for x in self.covariance_matrixes]            
+            self.covariance_matrixes = [x if not math.isinf(x) else 0.00001 for x in self.covariance_matrixes]
+            self.covariance_matrixes = [x if str(x) != 'nan' else 0.00001 for x in self.covariance_matrixes]    
             # Updating the pi list
             self.pi = [N[k]/len(X) for k in range(self.n_componets)]
            
@@ -149,7 +164,8 @@ class GMM:
         probas = []
         scores = []
         for n in range(len(X)):
-            tmp = [self.multivariate_normal(X[n], self.mean_vector[k], self.covariance_matrixes[k]) * self.pi[k] for k in range(self.n_componets)]
+            tmp = [self.multivariate_normal(X[n], self.mean_vector[k], self.covariance_matrixes[k]) for k in range(self.n_componets)]
+            probas.append(tmp)
             scores.append(max(tmp))
-        return(scores)
+        return(scores, probas)
 
