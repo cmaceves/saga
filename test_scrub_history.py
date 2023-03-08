@@ -1,2 +1,1 @@
-SENSITIVE_THING="hello"
 KEEP_THING="world"
