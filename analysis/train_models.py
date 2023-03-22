@@ -26,7 +26,7 @@ def main():
         #we need all info to continue 
         if len(associated_files) < 4:
             continue
-        #if sample_id != "SEARCH-61644":
+        #if not sample_id.startswith("SEARCH-61644"):
         #    continue
         associated_files = [os.path.join("./data", x) for x in associated_files]
         variants_file = [x for x in associated_files if "variants" in x][0]
@@ -40,8 +40,8 @@ def main():
 
         if not os.path.isdir(output_dir):
             os.system("mkdir %s" %output_dir)
-        #else:
-        #    continue
+        else:
+            continue
         print("creating results for ", sample_id)
         exit_code = run_model(variants_file, output_dir, output_name, problem_positions, physical_linkage_file, freyja_file)
         if exit_code == 1:
@@ -53,8 +53,10 @@ def main():
                 line = line.strip()
                 model_dictionary = json.loads(line)
                 model_dict = model_dictionary['autoencoder_dict']
-        write_fasta(model_dict, output_fasta_name, reference)
-        sys.exit(0)
+                problem_positions = model_dictionary['problem_positions']
+                problem_positions.extend(model_dictionary['low_depth_positions'])
+        write_fasta(model_dict, output_fasta_name, reference, problem_positions)
+        #sys.exit(0)
 
 if __name__ == "__main__":
     main()

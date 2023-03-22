@@ -28,8 +28,9 @@ def sequence_analysis(output_name):
             print(tmp, i)
             sys.exit(0)
 
-def write_fasta(autoencoder_dict, output_name, reference):
+def write_fasta(autoencoder_dict, output_name, reference, problem_positions):
     ref_seq = ""
+    problem_positions = [int(x) for x in problem_positions]
     with open(reference, "r") as rfile:
         for line in rfile:
             if line.startswith(">"):
@@ -37,6 +38,8 @@ def write_fasta(autoencoder_dict, output_name, reference):
             line = line.strip()
             ref_seq += line
     for key, value in autoencoder_dict.items():
+        if float(key) < 0.05:
+            continue
         trial_muts = autoencoder_dict[key]
         positions = []
         mutations = []
@@ -48,7 +51,7 @@ def write_fasta(autoencoder_dict, output_name, reference):
                 m = "+"+tm.split("+")[1]
                 mutations.append(m)
             elif "-" in tm:
-                continue
+                #continue
                 p = int(tm.split("-")[0])
                 positions.append(p)
                 m = "-"+tm.split("-")[1]
@@ -69,6 +72,8 @@ def write_fasta(autoencoder_dict, output_name, reference):
                     i += len(mut)-1
                 else:
                     final_seq += mut
+            elif i+1 in problem_positions:
+                final_seq += "N"
             else:
                 final_seq += ref_seq[i]
 

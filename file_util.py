@@ -5,7 +5,24 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 
-def parse_freyja_file(file_path, tolerance=0.98):
+
+def parse_usher_barcode(lineages, usher_file = "/Users/caceves/Desktop/contamination_work/usher_barcodes.csv"):
+    print("parsing usher barcodes...")
+    barcode = pd.read_csv(usher_file)
+
+    #initialize dictionary for mutation pos
+    l_dict = {}
+    for l in lineages:
+        l_dict[l] = []
+        tmp = barcode[barcode['Unnamed: 0'] == l]
+        tmp = tmp.loc[tmp.index.tolist()[0]].to_frame(name=l)[1:]
+        tmp = tmp[tmp[l] == 1].index.tolist()
+        tmp = [x[1:] for x in tmp]
+        l_dict[l] = tmp
+    return(l_dict)
+
+
+def parse_freyja_file(file_path, tolerance=0.99):
     """
     Open freyja results .tsv file and get the ground truth lineages and frequencies.
     """
@@ -31,23 +48,6 @@ def parse_freyja_file(file_path, tolerance=0.98):
     return(actual_centers, actual_lineages)
 
 def parse_physical_linkage_file(filename, positions, frequencies, nucs):
-    """
-    Parameters
-    ----------
-    filename : str
-        The full file path to the file containing physical linkage information line by line.
-    positions : list
-        List of all positions containing variants being considered.
-    frequencies : list
-    nucs : list
-    
-    Returns
-    -------
-    G : networkx
-        Graph object holding physical linkages.
-    
-    Takes in a physical linkage file as output by autoconsensus and write the physical linkage information to a graph. This is important because it allows interpretation based on mulitple linkages. Each node represents a mutation and each edge represents the count of that linkage. Output in addition to function returns is a graphxml file that represents the mutation connections.
-    """
     print("parsing physical linkage file...")
     #initialize a graph
     G = nx.Graph()
@@ -138,15 +138,14 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
     for index, row in df.iterrows():
         if "N" in row['ALT'] or "+" in row['ALT']:
             continue
-        
+         
         p = row['POS']
         n = row['ALT']
         if int(row['TOTAL_DP']) < 50:
-            low_depth_positions.append(str(n) + "_" + str(p))
+            low_depth_positions.append(str(p))
             continue
         if problem_positions is not None and int(p) in problem_positions:
             continue
-       
         f = float(row['ALT_FREQ'])
         positions.append(p)
         frequency.append(round(f, frequency_precision))
@@ -162,16 +161,16 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
     
     ref_freq = [1-x for x in unique_freq]
     for index, row in df.iterrows():
+        p = row['POS']
         if not p in unique_pos:
             continue
         loc = unique_pos.index(p)
         ref_nucs[loc] = row['REF']
-        n = row['REF']
-        reference_variants.append(str(n) + "_" + str(p))
 
-    
     frequency.extend(ref_freq)
     positions.extend(unique_pos)
     nucs.extend(ref_nucs)
 
+    reference_variants = [str(n) + '_' + str(p) for p,n in zip(unique_pos, ref_nucs) if n != 0]
+    
     return(positions, frequency, nucs, low_depth_positions, reference_variants)
