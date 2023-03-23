@@ -1,1 +1,0 @@
-KEEP_THING="world"

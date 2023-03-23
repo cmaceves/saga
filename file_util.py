@@ -6,7 +6,7 @@ import pandas as pd
 import networkx as nx
 
 
-def parse_usher_barcode(lineages, usher_file = "/Users/caceves/Desktop/contamination_work/usher_barcodes.csv"):
+def parse_usher_barcode(lineages, usher_file = "/Users/caceves/Desktop/contamination_work/usher_barcodes.csv", return_ref=False):
     print("parsing usher barcodes...")
     barcode = pd.read_csv(usher_file)
 
@@ -17,7 +17,8 @@ def parse_usher_barcode(lineages, usher_file = "/Users/caceves/Desktop/contamina
         tmp = barcode[barcode['Unnamed: 0'] == l]
         tmp = tmp.loc[tmp.index.tolist()[0]].to_frame(name=l)[1:]
         tmp = tmp[tmp[l] == 1].index.tolist()
-        tmp = [x[1:] for x in tmp]
+        if not return_ref:
+            tmp = [x[1:] for x in tmp]
         l_dict[l] = tmp
     return(l_dict)
 
