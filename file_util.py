@@ -6,7 +6,7 @@ import pandas as pd
 import networkx as nx
 
 
-def parse_usher_barcode(lineages, usher_file = "/Users/caceves/Desktop/contamination_work/usher_barcodes.csv", return_ref=False):
+def parse_usher_barcode(lineages, usher_file = "/home/chrissy/Desktop/usher_barcodes.csv", return_ref=False):
     print("parsing usher barcodes...")
     barcode = pd.read_csv(usher_file)
 
@@ -136,6 +136,10 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
     low_depth_positions = []
     reference_variants = []
 
+    #keep track of the reference positions/frequencies/nucs
+    unique_pos = []
+    unique_freq = []
+    ref_nucs = []
     for index, row in df.iterrows():
         if "N" in row['ALT'] or "+" in row['ALT']:
             continue
@@ -151,23 +155,16 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
         positions.append(p)
         frequency.append(round(f, frequency_precision))
         nucs.append(n)
-
-    unique_pos = list(np.unique(positions))
-    unique_freq = [0] * len(unique_pos)
-    ref_nucs = [0] * len(unique_pos)
-    
-    for p, f in zip(positions, frequency):
-        loc = unique_pos.index(p)
-        unique_freq[loc] += f
-    
+        
+        if p not in unique_pos:
+            unique_pos.append(p)
+            unique_freq.append(round(f, frequency_precision))
+            ref_nucs.append(row['REF'])
+        else:
+            loc = unique_pos.index(p)
+            unique_freq[loc] += round(f, frequency_precision)
+               
     ref_freq = [1-x for x in unique_freq]
-    for index, row in df.iterrows():
-        p = row['POS']
-        if not p in unique_pos:
-            continue
-        loc = unique_pos.index(p)
-        ref_nucs[loc] = row['REF']
-
     frequency.extend(ref_freq)
     positions.extend(unique_pos)
     nucs.extend(ref_nucs)
