@@ -23,7 +23,7 @@ def parse_usher_barcode(lineages, usher_file = "/home/chrissy/Desktop/usher_barc
     return(l_dict)
 
 
-def parse_freyja_file(file_path, tolerance=0.99):
+def parse_freyja_file(file_path, tolerance=0.97):
     """
     Open freyja results .tsv file and get the ground truth lineages and frequencies.
     """
@@ -170,5 +170,4 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
     nucs.extend(ref_nucs)
 
     reference_variants = [str(n) + '_' + str(p) for p,n in zip(unique_pos, ref_nucs) if n != 0]
-    
     return(positions, frequency, nucs, low_depth_positions, reference_variants)

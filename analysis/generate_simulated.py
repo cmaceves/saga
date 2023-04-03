@@ -55,6 +55,8 @@ def main():
 
     all_freyja_files = [os.path.join("./data", x) for x in os.listdir("./data") if "freyja" in x]
     for filename in all_freyja_files:
+        #if "SEARCH-63546" not in filename:
+        #    continue
         actual_centers, actual_lineages = file_util.parse_freyja_file(filename)         
         
         file_id = os.path.basename(filename).replace("_L001_L002_freyja_results.tsv", "")
@@ -66,13 +68,15 @@ def main():
         #create a vcf for every lineage
         for center, vcf_lineage in zip(actual_centers, actual_lineages):
             output_vcf_name = "./vcfs/%s.vcf" %vcf_lineage
-            percent = round(center, 3)   
+            percent = round(center, 4)   
+            if percent < 0.0005:
+                continue
             if not os.path.isfile(output_vcf_name): 
                 create_vcf(vcf_lineage, template_vcf, output_vcf_name)  
     
             basename = "%s_%s" %(vcf_lineage, percent)
             percent_str = str(int(percent*100))
-
+            
             output_filename = '%s/simulated_%s_%s.bam' %(simulated_output, vcf_lineage, percent_str)
             if os.path.isfile(output_filename):
                 continue
@@ -80,7 +84,10 @@ def main():
             output_1 = "%s_1.fq" %(basename)
             output_2 = "%s_2.fq" %(basename)
             num_reads = int((base_num_reads*percent)/2)
-            
+            #print("center:", center, "lineage:", vcf_lineage, "num_reads:", \
+            #    num_reads, "percent:", float(base_num_reads*percent))
+            #continue
+            #sys.exit(0) 
             cmd = 'reseq illuminaPE -j 32 -r ../../sequence.fasta -b aaron.preprocessed.bam -V %s -1 %s -2 %s --numReads %s -v %s --noBias' %(output_vcf_name, output_1, output_2, str(num_reads), output_vcf_name)
             cmd2 = 'bwa mem -t 32 ../../sequence.fasta %s %s | samtools view -b -F 4 -F 2048 | samtools sort -o %s' %(output_1, output_2, output_filename)
 
@@ -88,7 +95,6 @@ def main():
             os.system(cmd2)
             os.system("rm %s" %output_1)
             os.system("rm %s" %output_2)
-         
         bam_name = os.path.join(simulated_output, file_id+".bam")
         if not os.path.isfile(bam_name):
             #samtools merge 
@@ -97,9 +103,10 @@ def main():
 
         variants_name = os.path.join(simulated_output, file_id+"_variants")
         #ivar variants
-        if not os.path.isfile(variants_name + ".tsv"):
-            cmd = "samtools mpileup -aa -A -d 0 -B -Q 0 --reference %s  %s | ivar variants -p %s -q 20 -t 0 -m 0 -r %s" %("../../sequence.fasta", bam_name, variants_name, "../../sequence.fasta")
-            os.system(cmd)
+        #if not os.path.isfile(variants_name + ".tsv"):
+        cmd = "samtools mpileup -aa -A -d 0 -B -Q 0 --reference %s  %s | ivar variants -p %s -q 20 -t 0 -m 0 -r %s" %("../../sequence.fasta", bam_name, variants_name, "../../sequence.fasta")
+        os.system(cmd)
+        #sys.exit(0)
 
 if __name__ == "__main__":
     main()

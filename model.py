@@ -10,14 +10,18 @@ import itertools
 import numpy as np
 import pandas as pd
 import networkx as nx
+from scipy import spatial
 from networkx.algorithms.components import connected_components
 from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
+from sklearn.cluster import KMeans
 from sklearn.neighbors import KernelDensity
+
+from line_profiler import LineProfiler
 
 import file_util
 import math_util
 
-from gmm import GMM
+from other_gmm import GMM
 
 def filter_combinations(combination_solutions, combination_sums):
     #remove things where all signals > 0.03 are the same
@@ -30,8 +34,6 @@ def filter_combinations(combination_solutions, combination_sums):
     filter_1_sum.extend(combination_sums[:10])
     counter = 0
     for j, (sol, sm) in enumerate(zip(combination_solutions, combination_sums)):
-        #if j % 100000 == 0:
-        #    print(j)
         if sm > 0.97:
             continue
         if sol in filter_1_sol:
@@ -81,13 +83,6 @@ def filter_combinations(combination_solutions, combination_sums):
                 filter_1_sum.append(sm)
         counter += 1
 
-    print(len(filter_1_sol))
-    """
-    print(filter_1_sol[-1])
-    print(filter_1_sol[-2])
-    print(filter_1_sum[-1])
-    print(filter_1_sum[-2])
-    """
     return(filter_1_sol, filter_1_sum)
     
 def determine_close_individuals(solution, tolerance = 0.01):
@@ -129,7 +124,7 @@ def generate_combinations(n, solution):
         elif s < highest_val_over_3_percent:
             highest_val_over_3_percent = s
     for L in range(n + 1):
-        print("L", L, "out of", n+1)
+        #print("L", L, "out of", n+1)
         for subset in itertools.combinations(solution, L):
             things_over_3_percent = 0
             things_under_3_percent_sum = 0
@@ -150,9 +145,9 @@ def generate_combinations(n, solution):
             if len(subset) < 1:
                 continue                   
             
-            sum_val = round(sum(subset), 5)
+            #sum_val = round(sum(subset), 5)
             combination_solutions.append(subset)
-            combination_sums.append(sum_val)
+            combination_sums.append(sum(subset))
     return(combination_solutions, combination_sums)
 
 def assign_clusters(frequencies, transformed_centers):
@@ -172,7 +167,7 @@ def assign_clusters(frequencies, transformed_centers):
 
     return(cluster_points, return_points)
 
-def define_kde(frequencies, bw=0.0001, round_decimal=4, num=1000):
+def define_kde(frequencies, bw=0.0001, round_decimal=4, num=2000):
     x = np.array(frequencies)
     x_full = x.reshape(-1, 1)
     eval_points = np.linspace(np.min(x_full), np.max(x_full), num=num)
@@ -184,9 +179,7 @@ def define_kde(frequencies, bw=0.0001, round_decimal=4, num=1000):
     for i, xx in enumerate(eval_points):
         if i in ind:
             peak.append(round(xx, round_decimal))
-
-    kde_peaks = list(np.unique(peak))
-    return(kde_peaks)
+    return(peak)
 
 def apply_physical_linkage(solution_space, G, kde_peaks, positions, nucs, frequencies):
     arr = np.asarray(kde_peaks)
@@ -272,59 +265,120 @@ def apply_physical_linkage(solution_space, G, kde_peaks, positions, nucs, freque
     return(new_solutions, frequencies_remove)
 
 def create_solution_space(kde_peaks, n, total_value=1):
-    print("creating solution space...")
-
+    print("creating solution space for %s things..." %n)
     overlap_sets = []
     flat = []
+    lower_bound = total_value + 0.03
+    upper_bound = total_value - 0.05
     for subset in itertools.combinations(kde_peaks, n):
         subset = list(subset)
+        total = sum(subset) #most expensive line
+        if (total > lower_bound) or (total < upper_bound):
+            continue
         overlap_sets.append(subset)
-    print("parsing down solution space...")    
-    for os in overlap_sets:
-        if np.sum(os) < total_value+0.03 and np.sum(os) > total_value-0.03:
-            os = list(os)
-            combos = []
-            #recombine again
-            for L in range(len(os) + 1):
-                for subset in itertools.combinations(os, L):
-                    if 0 in list(subset):
-                        continue
-                    if len(list(subset)) < 2:
-                        continue
-                    combos.append(round(sum(list(subset)), 3))
-            outer_found = True
-            for peak in kde_peaks:
-                found = False 
-                #the peak could be a noise peak
-                if peak < min(os) or peak >= 0.98:
-                    continue
-                if peak in os:
-                    continue
-                for item in combos:
-                    if(abs(item-peak) <= 0.03):
-                        found = True
-                for item in os:
-                    if(abs(item-peak) <= 0.03):
-                        found = True
-                if found is False:
-                    pass
-            if outer_found is True:
-                flat.append(os)
-    return(flat)
+    new_overlap_set = []
 
-def run_model(variants_file, output_dir, output_name, primer_mismatches, physical_linkage_file=None, freyja_file=None):
-    freq_lower_bound = 0.01
+    #each data peak must be represented in the data
+    for subset in overlap_sets:
+        combination_solutions, combination_sums = generate_combinations(n, subset) 
+        combination_sums.sort(reverse=True)
+        combination_sums = np.array(combination_sums)    
+        found = True
+        for peak in kde_peaks:
+            #we don't care too much about the tiny peaks
+            if peak < 0.03:
+                continue
+            index = (np.abs(combination_sums-peak)).argmin()
+            match = combination_sums[index]
+            if abs(match-peak) > 0.02:
+                #print(peak, match, combination_sums)
+                found = False
+                break
+        if found:
+            new_overlap_set.append(subset)
+
+    return(overlap_sets)
+
+def possible_conflicts(combination_sums, combination_solutions, solution):
+    """
+    Where do peaks conflict, what constitutes those conflicts?
+    """
+    #initialize
+    conflict_dict = {}
+    for csum in combination_sums:
+        conflict_dict[csum] = []
+    
+    for i, (csum, csol) in enumerate(zip(combination_sums, combination_solutions)):
+        csol = list(csol)
+        for j, (csum2, csol2) in enumerate(zip(combination_sums, combination_solutions)):
+            #identity
+            if i == j:
+                continue
+            csol2 = list(csol2)
+            if abs(csum - csum2) < 0.01:               
+                misfire = [x for x in csol if x not in csol2]
+                misfire.extend([x for x in csol2 if x not in csol])
+                misfire.sort()
+                current_list = conflict_dict[csum]                
+                current_list.append({csum2:misfire})                
+                conflict_dict[csum] = current_list
+
+    return(conflict_dict)
+
+def collapse_solution_space(solution_space, threshold = 0.005, n_clusters=50):
+    """
+    Treat all points under threshold as same population, eliminate solution duplicates.
+    """
+    print("collapsing solution space...")
+    new_solution_space = []
+    longest_solution = 0
+    #here we collapse points less than the threshold into one category
+    for solution in solution_space:
+        tmp_sol = [x for x in solution if x >= threshold]
+        tmp_sol_low = [x for x in solution if x < threshold]
+        solution = tmp_sol
+        other = round(sum(tmp_sol_low), 5)
+        if other > 0:
+            solution.append(other)
+        if len(solution) > longest_solution:
+            longest_solution = len(solution)
+        solution.sort(reverse=True)
+        new_solution_space.append(solution)
+    padded_data = []
+    for solution in new_solution_space:
+        if len(solution) < longest_solution:
+            zeros = longest_solution - len(solution)
+            solution.extend([0.0] * zeros)
+        padded_data.append(solution)
+
+    padded_data = np.array(padded_data)
+    #let's now cluster the solutions to try and eliminate duplicates
+    k_solutions = KMeans(n_clusters=n_clusters)
+    k_solutions.fit(padded_data)
+    clustered_solutions = k_solutions.cluster_centers_
+    
+    new_solution_space = []    
+    for solution in clustered_solutions:
+        solution = [round(x,5) for x in list(solution) if x > threshold]
+        new_solution_space.append(solution)
+    return(new_solution_space)
+
+def run_model(variants_file, output_dir, output_name, primer_mismatches=None, physical_linkage_file=None, freyja_file=None):
+    freq_lower_bound = 0.0001
     freq_upper_bound = 0.95
     freq_precision = 5 
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
-
-    
+ 
     if freyja_file is not None:
         gt_centers, gt_lineages = file_util.parse_freyja_file(freyja_file)
         gt_mut_dict = file_util.parse_usher_barcode(gt_lineages)
-    problem_positions = file_util.parse_primer_mismatches(primer_mismatches)
-    print("problem positions:", problem_positions)
-    #problem_positions = None
+        #lets try and see if this file is even reasonable to try and parse
+        
+    if primer_mismatches is not None:
+        problem_positions = file_util.parse_primer_mismatches(primer_mismatches)
+        print("problem positions:", problem_positions)
+    else:
+        problem_positions = None
     positions, frequency, nucs, low_depth_positions, reference_positions = file_util.parse_ivar_variants_file(
             variants_file, \
             freq_precision, \
@@ -332,21 +386,45 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     new_frequencies = [round(x, freq_precision) for x in frequency if x > freq_lower_bound and x < freq_upper_bound]
     solution_space = [] 
     kde_peaks = define_kde(new_frequencies)
-    
-    #TESTLINE
-    check2 = gt_mut_dict[gt_lineages[0]]
-    check = gt_mut_dict[gt_lineages[1]]
+    kde_peaks.sort(reverse=True)
+    print("kde peaks", kde_peaks, len(kde_peaks)) 
+    """
+    To acheive a KDE that recognizes low frequencies, we must set the linspace such that it returns many local maxima, however often these values are repetitive. A simple linear clustering model (KMeans) helps refine the kde peaks to summarize the local maxima in the frequencies.
+    """
+    kde_reshape = np.array(kde_peaks).reshape(-1,1)
+    cluster_model = GaussianMixture(n_components=25)
+    cluster_model.fit(kde_reshape)
+    refined_kde_peaks = np.array(cluster_model.means_)
+    refined_kde_peaks = list(np.squeeze(refined_kde_peaks))
+    refined_kde_peaks.sort(reverse=True)
+    refined_kde_peaks = [round(x,5) for x in refined_kde_peaks]
+    print("original refined", refined_kde_peaks)
+    #TESTLINE FOR PRINTING DOWNSTREAM
+    check = gt_mut_dict[gt_lineages[0]]
+    check2 = gt_mut_dict[gt_lineages[1]]
     check3 = gt_mut_dict[gt_lineages[2]]
-    """
-    sys.exit(0)
+    check4 = gt_mut_dict[gt_lineages[3]]
+    check5 = gt_mut_dict[gt_lineages[4]]
+    check6 = gt_mut_dict[gt_lineages[5]]
+    
+    #we can only reasonably pass like 25 peaks to the solution space 
+    print("gt_centers", gt_centers)
+    n_clusters = [3,4,5,6,7,8,9, 10]
     for n in n_clusters:
-        solution_space.extend(create_solution_space(kde_peaks, n))    
-    """
+        """
+        lp = LineProfiler()
+        lp_wrapper = lp(create_solution_space)
+        lp_wrapper(refined_kde_peaks, n)
+        lp.print_stats()
+        sys.exit(0)
+        """
+        n_solution = create_solution_space(refined_kde_peaks, n)
+        solution_space.extend(n_solution)  
+    new_solution_space = collapse_solution_space(solution_space) 
     new_positions = [y for x,y in zip(frequency, positions) if x > freq_lower_bound and x < freq_upper_bound]
     new_nucs = [y for x,y in zip(frequency, nucs) if float(x) > freq_lower_bound and float(x) < freq_upper_bound]
     universal_mutations = [str(x)+str(y) for (x,y,z) in zip(positions, nucs, frequency) if float(z) > freq_upper_bound and str(y) != '0']
-    #print("universal mutations:", universal_mutations)
-    print(len(universal_mutations), "universal mutations found")
+    
     """
     G = file_util.parse_physical_linkage_file(physical_linkage_file, new_positions, \
             new_frequencies, \
@@ -360,103 +438,86 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     sys.exit(0)
     """
     all_models = []
-    all_model_scores = []
-    all_final_points = []
-    new_solution_space = [gt_centers]
-    
-    all_combination_sums = []
-    all_combination_solutions = []
-    all_junk_points = []
-    impossible_solutions = []
+    all_model_log_likelihood = []
+    all_final_points = []    
+    all_conflict_dicts = []    
+    all_minimum_scores = []
     print("solution space contains %s solutions..." %len(new_solution_space))
     print("training models...")
-    print(new_solution_space)
-    #fit a model for each possible solution
-    for i, solution in enumerate(new_solution_space):
-        tmp_sol = [x for x in solution if x > 0.01]
-        tmp_sol_low = [x for x in solution if x < 0.01]
-        solution = tmp_sol
-        other = sum(tmp_sol_low)
-        n = len(solution)
-
-        #looking for places we might not be able to see individual pops
-        individual_overlaps = determine_close_individuals(solution)
-        print(solution)
-        solution.append(other)
+   
+    #we really only need to fit the model for data over 3% 
+    training_data = np.array([x for x in new_frequencies if x > 0.03])
+    training_data = np.expand_dims(training_data, axis=1)
+    
+    #fit a model for each possible solution 
+    for i, solution in enumerate(new_solution_space):      
         n = len(solution)
         combination_solutions, combination_sums = generate_combinations(n, solution)
+        combination_sums = [round(x,5) for x in combination_sums]
         combination_solutions, combination_sums = filter_combinations(combination_solutions, combination_sums)
-        print(len(combination_sums))               
-        all_junk_points.append(other)
-        all_combination_sums.append(combination_sums)
-        all_combination_solutions.append(combination_solutions)
-        clustered_data, filtered_points_2 = assign_clusters(new_frequencies, combination_sums)
+
+        conflict_dict = possible_conflicts(combination_sums, combination_solutions, solution)       
         final_points = []
-        for i, (cd, tp) in enumerate(zip(clustered_data, combination_sums)):
+        for i, tp in enumerate(combination_sums):
             if i < len(solution):
                 pass
             elif len(combination_solutions[i]) == 1:
                 pass
             elif tp >= 1.0:
                 continue
-            elif (tp / len(combination_solutions[i])) < 0.05:
-                  #print(tp, combination_solutions[i])
-                  continue
-            #elif len(cd) == 0:
-            #    continue
             final_points.append(tp)
-        #print("initial mean length:", len(final_points))
-        #print(final_points)
-        print(len(final_points), len(combination_solutions))
-        #sys.exit(0)
-        all_final_points.append(final_points)
-      
-        gx = GMM(n_components=len(final_points), mean_init=final_points)
-        gx.fit(new_frequencies)
-        likelihoods, all_likelihoods = gx.score(new_frequencies)
 
-        sorted_likelihood = copy.deepcopy(likelihoods)
-        deep_freq = copy.deepcopy(new_frequencies)
-        zipped = list(zip(sorted_likelihood, deep_freq, all_likelihoods))
-        zipped.sort()
-        sorted_likelihood, deep_freq, all_likelihoods = zip(*zipped)
-        min_likelihood = sorted_likelihood[0]
-        
-        mod_means = [round(x,5) for x in list(gx.mean_vector)]
-        again_final_points = []
+        final_points_expand = np.expand_dims(final_points, axis=1)
+        gx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand)
+        gx.init_em(training_data)
+        num_iters = 30
+        log_likelihood = [gx.log_likelihood(training_data)]
+        for e in range(num_iters):
+            gx.e_step()
+            gx.m_step()
+            ll = gx.log_likelihood(training_data)
+            log_likelihood.append(ll)
+            #print("Iteration: {}, log-likelihood: {:.4f}".format(e+1, log_likelihood[-1]))
+        assignment, score, all_scores = gx.score(training_data)
+
+        minimum_score = min(score) 
+        #save relevant information
         all_final_points.append(final_points)
         all_models.append(gx)
-        #all_model_scores.append(min_likelihood)
-        all_model_scores.append(np.mean(sorted_likelihood))
+        all_model_log_likelihood.append(log_likelihood[-1])
+        all_conflict_dicts.append(conflict_dict)
+        all_minimum_scores.append(minimum_score)
+        print(solution)
+        print("log likelihood", log_likelihood[-1], "minimum_score", minimum_score)
 
-    #TESTLINE
-    sorted_scores = copy.deepcopy(all_model_scores)
+    sorted_scores = copy.deepcopy(all_mimimum_scores)
     sorted_scores.sort(reverse=True)
-    for score in sorted_scores[:5]:
-        loc = all_model_scores.index(score)
-        print(score, new_solution_space[loc])
-
+    for score in sorted_scores[:10]:
+        loc = all_minimum_scores.index(score)
+        print(score, new_solution_space[loc], all_model_log_likelihood[loc])
+    sys.exit(0)
     highest_score = max(all_model_scores)
-
     loc_best_model = all_model_scores.index(highest_score)
+
     solution = new_solution_space[loc_best_model]
     final_points = all_final_points[loc_best_model]
 
     combination_solutions = all_combination_solutions[loc_best_model]
     combination_sums = all_combination_sums[loc_best_model]
-    junk_point = all_junk_points[loc_best_model]
     other_solution = [x for x in solution if x > 0.03]
     throwaway = [x for x in solution if x < 0.03]
-    other_solution.append(junk_point)
     gx = all_models[loc_best_model]
     likelihoods, all_likelihoods  = gx.score(new_frequencies)
     
     print("minimum likelihood", min(likelihoods)) 
     print("highest model score", highest_score)
     print("solution", solution)
-    print("means", gx.mean_vector)    
+    print("means", gx.mean_vector) 
+    sys.exit(0)   
     autoencoder_dict = {}
     tmp_universal_mutations = []
+
+    #sys.exit(0)
     for um in universal_mutations:
         tum = um[-1] + "_" + um[:-1]
         if tum not in reference_positions:
@@ -483,17 +544,12 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         adjusted_scores = []
         passed = False
         for t, al in zip(tmp_means, all_like):
-            loc = combination_sums.index(t)
-            tmp_sol = combination_solutions[loc]
-            total = len(tmp_sol)
-            if junk_point in tmp_sol:
-                total -= 1
-                total += len(throwaway)
-            #total += len([x for x in tmp_sol if x < 0.03]) * 3
-            new_score = al / (total)
+            arr = np.array(combination_sums)
+            loc = np.abs(arr-t).argmin() 
+            new_score = al
             adjusted_scores.append(new_score)
-            #if point == 0.19698 and new_score > 0.0001:
-            #    print(t, point, al, combination_solutions[combination_sums.index(t)], new_score, total)
+            if variant == "1766A" or variant == "2470T": #and new_score > 0:
+                print(t, point, al, combination_solutions[loc])
  
         zipped = list(zip(adjusted_scores, tmp_means))
         zipped.sort(reverse=True)
@@ -501,14 +557,12 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
         location = -1
         score = -1
         for t, al in zip(tmp_means, adjusted_scores):
-            if ((abs(point-t) < (point * 0.05)) or (abs(point-t) < 0.01)) and al > 0.0:
+            if ((abs(point-t) < (point * 0.10)) or (abs(point-t) < 0.01)) and al > 0.0:
                 if passed is False:
-                    location = combination_sums.index(t)
+                    location = np.abs(arr-t).argmin() 
                     score = al
                     passed = True
-            #if point == 0.844:
-            #    print(t, point, al, combination_solutions[combination_sums.index(t)])
-    
+   
         
         if location != -1:
             print("\nlocation", location, combination_sums[location], combination_solutions[location])
@@ -524,8 +578,6 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
             continue
         
         for individual in combination_solutions[location]:
-            if individual == junk_point:
-                continue
             tmp_list = copy.deepcopy(autoencoder_dict[individual])
             tmp_list.append(variant)
             autoencoder_dict[individual] = tmp_list
@@ -533,25 +585,48 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches, physica
     check.sort()
     check2.sort()
     check3.sort()
+    check4.sort()
+    check5.sort()
+    check6.sort()
+
     check_fail = []
     check2_fail = []
     check3_fail = []
+    check4_fail = []
+    check5_fail = []
+    check6_fail = []
+
     print(variants_file)
     for key, value in autoencoder_dict.items(): 
         value.sort()
         if counter == 0:
-            check_fail = [item for item in check if item not in value]
+            check_fail = [item for item in check if item not in value and item[:-1] not in low_depth_positions]
             print("\n", key, check_fail)
-            print("extra", [item for item in value if item not in check and "-" not in item])
+            print("extra", [item for item in value if item not in check and "-" not in item and item[:-1] not in low_depth_positions])
         elif counter == 1:
-            check2_fail = [item for item in check2 if item not in value]
+            check2_fail = [item for item in check2 if item not in value and item[:-1] not in low_depth_positions]
             print("\n", key, check2_fail)
-            print("extra", [item for item in value if item not in check2 and "-" not in item])
+            print("extra", [item for item in value if item not in check2 and "-" not in item and item[:-1] not in low_depth_positions])
         elif counter == 2:
-            check3_fail = [item for item in check3 if item not in value]
+            check3_fail = [item for item in check3 if item not in value and item[:-1] not in low_depth_positions]
             print("\n", key, check3_fail)
-            print("\nextra", [item for item in value if item not in check3 and "-" not in item])
+            print("\nextra", [item for item in value if item not in check3 and "-" not in item and item[:-1] not in low_depth_positions])
+        elif counter == 3:
+            check4_fail = [item for item in check4 if item not in value and item[:-1] not in low_depth_positions]
+            print("\n", key, check4_fail)
+            print("\nextra", [item for item in value if item not in check4 and "-" not in item and item[:-1] not in  low_depth_positions])
+        elif counter == 4:
+            check5_fail = [item for item in check5 if item not in value and item[:-1] not in low_depth_positions]
+            print("\n", key, check5_fail)
+            print("\nextra", [item for item in value if item not in check5 and "-" not in item and item[:-1] not in  low_depth_positions])
+        elif counter == 5:
+            check6_fail = [item for item in check6 if item not in value and item[:-1] not in low_depth_positions]
+            print("\n", key, check6_fail)
+            print("\nextra", [item for item in value if item not in check6 and "-" not in item and item[:-1] not in  low_depth_positions])
+           
         counter += 1
+    print("low depth positions:", np.unique(low_depth_positions))
+
     tmp_dict = {"autoencoder_dict":autoencoder_dict, "score": min(likelihoods), "problem_positions":problem_positions, "low_depth_positions":low_depth_positions, "variants":save_variants, "scores":save_scores}
     with open(text_file, "a") as bfile:
         bfile.write(json.dumps(tmp_dict))
