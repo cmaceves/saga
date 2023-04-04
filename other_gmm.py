@@ -75,7 +75,15 @@ class GMM():
         for d in X:
             tot = 0
             for i in range(self.k):
-                x = self.pi[i] * multivariate_normal.pdf(d, mean=self.mu[i], cov=self.sigma[i])
+                #if it's zero, set it to something negilbly small so the program doesn't break
+                if self.sigma[i][0][0] == 0:
+                    self.sigma[i][0][0] = 0.0000001
+                    print("here", self.sigma[i][0][0], self.pi[i])
+                try:
+                    x = self.pi[i] * multivariate_normal.pdf(d, mean=self.mu[i], cov=self.sigma[i])
+                except:
+                    print('this', self.sigma[i][0][0], self.pi[i], self.mu[i])
+                    sys.exit(0)
                 tot += x
             ll.append(np.log(tot))
         return(np.sum(ll))
