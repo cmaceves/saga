@@ -4,13 +4,16 @@ Functionality for running the model.
 import os
 import sys
 import copy
+import math
 import json
+import random
 import itertools
 
 import numpy as np
 import pandas as pd
 import networkx as nx
 from scipy import spatial
+from joblib import Parallel, delayed
 from networkx.algorithms.components import connected_components
 from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
 from sklearn.cluster import KMeans
@@ -22,6 +25,10 @@ import file_util
 import math_util
 
 from other_gmm import GMM
+random.seed(10)
+np.random.seed(10)
+
+DEBUG=True
 
 def filter_combinations(combination_solutions, combination_sums):
     #remove things where all signals > 0.03 are the same
@@ -167,7 +174,7 @@ def assign_clusters(frequencies, transformed_centers):
 
     return(cluster_points, return_points)
 
-def define_kde(frequencies, bw=0.0001, round_decimal=4, num=2000):
+def define_kde(frequencies, bw=0.0001, round_decimal=4, num=3000):
     x = np.array(frequencies)
     x_full = x.reshape(-1, 1)
     eval_points = np.linspace(np.min(x_full), np.max(x_full), num=num)
@@ -269,7 +276,7 @@ def create_solution_space(kde_peaks, n, total_value=1):
     overlap_sets = []
     flat = []
     lower_bound = total_value + 0.03
-    upper_bound = total_value - 0.05
+    upper_bound = total_value - 0.25
     for subset in itertools.combinations(kde_peaks, n):
         subset = list(subset)
         total = sum(subset) #most expensive line
@@ -359,22 +366,49 @@ def collapse_solution_space(solution_space, threshold = 0.005, n_clusters=50):
     
     new_solution_space = []    
     for solution in clustered_solutions:
+        summation = sum(solution)
+        #if summation > 1:
+        #    continue
         solution = [round(x,5) for x in list(solution) if x > threshold]
-        new_solution_space.append(solution)
+        diff = 1-summation
+        #we need something still in the ballpark of 100%
+         
+        if diff < 0.97 and diff > 0:
+            solution, include = find_duplicate(solution)
+            if include:
+                new_solution_space.append(solution)
+        else:
+            new_solution_space.append(solution)
     return(new_solution_space)
+
+def find_duplicate(solution):
+    diff = 1 - sum(solution)
+    combination_solutions, combination_sums = generate_combinations(len(solution), solution)
+    combination_sums = [round(x,5) for x in combination_sums]
+
+    arr = np.array(combination_sums)
+    idx = np.abs(arr - diff).argmin()
+    duplicate = combination_sums[idx]
+
+    if abs(duplicate-diff) > 0.03:
+        return(solution, False)
+    else:
+        dups = list(combination_solutions[idx])
+        solution.extend(dups)
+        solution.sort(reverse=True)
+        return(solution, True)
 
 def run_model(variants_file, output_dir, output_name, primer_mismatches=None, physical_linkage_file=None, freyja_file=None):
     freq_lower_bound = 0.0001
     freq_upper_bound = 0.95
-    solutions_to_train = 20
+    solutions_to_train = 30
     training_lower_bound = 0.03
-    freq_precision = 5 
+    freq_precision = 3 
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
  
     if freyja_file is not None:
         gt_centers, gt_lineages = file_util.parse_freyja_file(freyja_file)
         gt_mut_dict = file_util.parse_usher_barcode(gt_lineages)
-        #lets try and see if this file is even reasonable to try and parse
         
     if primer_mismatches is not None:
         problem_positions = file_util.parse_primer_mismatches(primer_mismatches)
@@ -386,45 +420,37 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
             freq_precision, \
             problem_positions)
     new_frequencies = [round(x, freq_precision) for x in frequency if x > freq_lower_bound and x < freq_upper_bound]
-    solution_space = [] 
+    solution_space = []
     kde_peaks = define_kde(new_frequencies)
     kde_peaks.sort(reverse=True)
-    print("kde peaks", kde_peaks, len(kde_peaks)) 
+    print("kde peaks", kde_peaks, len(kde_peaks))
     """
     To acheive a KDE that recognizes low frequencies, we must set the linspace such that it returns many local maxima, however often these values are repetitive. A simple linear clustering model (KMeans) helps refine the kde peaks to summarize the local maxima in the frequencies.
     """
     kde_reshape = np.array(kde_peaks).reshape(-1,1)
-    cluster_model = GaussianMixture(n_components=25)
+    cluster_model = GaussianMixture(n_components=30)
     cluster_model.fit(kde_reshape)
     refined_kde_peaks = np.array(cluster_model.means_)
     refined_kde_peaks = list(np.squeeze(refined_kde_peaks))
     refined_kde_peaks.sort(reverse=True)
-    refined_kde_peaks = [round(x,5) for x in refined_kde_peaks]
+    refined_kde_peaks = [round(x, freq_precision) for x in refined_kde_peaks]
     print("original refined", refined_kde_peaks)
 
-    #TESTLINE FOR PRINTING DOWNSTREAM
-    check = gt_mut_dict[gt_lineages[0]]
-    check2 = gt_mut_dict[gt_lineages[1]]
-    check3 = gt_mut_dict[gt_lineages[2]]
-    check4 = gt_mut_dict[gt_lineages[3]]
-    check5 = gt_mut_dict[gt_lineages[4]]
-    check6 = gt_mut_dict[gt_lineages[5]]
-    
-    #we can only reasonably pass like 25 peaks to the solution space 
     print("gt_centers", gt_centers)
-    n_clusters = [3,4,5,6,7,8,9, 10]
+    n_clusters = list(np.arange(2,20))
+    aic_list = []
+    training_data = np.array([x for x in new_frequencies if x > training_lower_bound])
+    tmp_reshape = np.array(training_data).reshape(-1,1)
+
+    #THIS NEEDS TO BE CHANGED TO BE ESTIMATED IN ADVANCE
+    n = 9
+    n_clusters = [n]
     for n in n_clusters:
-        """
-        lp = LineProfiler()
-        lp_wrapper = lp(create_solution_space)
-        lp_wrapper(refined_kde_peaks, n)
-        lp.print_stats()
-        sys.exit(0)
-        """
         n_solution = create_solution_space(refined_kde_peaks, n)
-        solution_space.extend(n_solution)  
+        solution_space.extend(n_solution) 
+    print("length of solution space", len(solution_space))
     new_solution_space = collapse_solution_space(solution_space, n_clusters=solutions_to_train) 
-   
+    print("length of collapse solution space", len(new_solution_space))
     """
     G = file_util.parse_physical_linkage_file(physical_linkage_file, new_positions, \
             new_frequencies, \
@@ -437,26 +463,48 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
             new_positions, new_nucs, new_frequencies)
     sys.exit(0)
     """
+
+    if DEBUG:    
+        check = gt_mut_dict[gt_lineages[0]]
+        check2 = gt_mut_dict[gt_lineages[1]]
+        check3 = gt_mut_dict[gt_lineages[2]]
+       
     all_models = []
     all_model_log_likelihood = []
     all_final_points = []    
     all_conflict_dicts = []    
-    all_minimum_scores = []
+    maximum_likelihood_points = []
+    all_saved_solutions = []
+    all_aic = []
     print("solution space contains %s solutions..." %len(new_solution_space))
     print("training models...")
    
     #we really only need to fit the model for data over 3% 
     training_data = np.array([x for x in new_frequencies if x > training_lower_bound])
     training_data = np.expand_dims(training_data, axis=1)
-    new_positions = [y for x,y in zip(frequency, positions) if x > training_lower_bound and x < freq_upper_bound]
+    new_positions = [y for x,y in zip(frequency, positions) if float(x) > training_lower_bound and x < freq_upper_bound]
     new_nucs = [y for x,y in zip(frequency, nucs) if float(x) > training_lower_bound and float(x) < freq_upper_bound]
     universal_mutations = [str(x)+str(y) for (x,y,z) in zip(positions, nucs, frequency) if float(z) > freq_upper_bound and str(y) != '0']
-    
+    tmp_universal_mutations = []
+    for um in universal_mutations:
+        tum = um[-1] + "_" + um[:-1]
+        if tum not in reference_positions:
+            tmp_universal_mutations.append(um)
+    universal_mutations = tmp_universal_mutations
+
     #fit a model for each possible solution 
-    for i, solution in enumerate(new_solution_space):      
+    for i, solution in enumerate(new_solution_space):        
+        tmp_solution = [x for x in solution if x > 0.03]
+        other_point = sum([x for x in solution if x <= 0.03])
+        if other_point > 0.01:
+            tmp_solution.append(other_point)
+        solution = tmp_solution
+        #print(solution)
+        #continue 
+        all_saved_solutions.append(solution)
         n = len(solution)
         combination_solutions, combination_sums = generate_combinations(n, solution)
-        combination_sums = [round(x,5) for x in combination_sums]
+        combination_sums = [round(x, freq_precision) for x in combination_sums]
         combination_solutions, combination_sums = filter_combinations(combination_solutions, combination_sums)
         conflict_dict = possible_conflicts(combination_sums, combination_solutions, solution)       
         final_points = []
@@ -467,78 +515,78 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
                 pass
             elif tp >= 1.0:
                 continue
-            final_points.append(tp)
-
+            #duplicate populations
+            elif tp in final_points:
+                continue
+            final_points.append(round(tp, freq_precision))
         final_points_expand = np.expand_dims(final_points, axis=1)
-        gx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand)
+        gx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand, name=variants_file)
         gx.init_em(training_data)
-        num_iters = 30
-        log_likelihood = [gx.log_likelihood(training_data)]
+        num_iters = 60
+        log_likelihood = []
         for e in range(num_iters):
             gx.e_step()
             gx.m_step()
-            ll = gx.log_likelihood(training_data)
-            log_likelihood.append(ll)
-            #print("Iteration: {}, log-likelihood: {:.4f}".format(e+1, log_likelihood[-1]))
-        assignment, score, all_scores = gx.score(training_data)
 
-        minimum_score = min(score) 
+        ll = gx.log_likelihood(training_data)
+        log_likelihood.append(ll)
+        assignment, score, all_scores = gx.score(training_data)
+        sll = [np.log(x) for x,y in zip(score, training_data) if y > 0.03]
+
+        
+        for a, s, ass, td  in zip(assignment, score, all_scores, training_data):
+            point = a[0]
+            idx = combination_sums.index(point)
+            sol = combination_solutions[idx]
+            #if td > 0.05 and td < 0.90:
+            #    print("assignment", point, "score", s, "point", td, np.log(s))
+        
         #save relevant information
         all_final_points.append(final_points)
         all_models.append(gx)
         all_model_log_likelihood.append(log_likelihood[-1])
-        all_conflict_dicts.append(conflict_dict)
-        all_minimum_scores.append(minimum_score)
-        print("i", i, "solution", solution)
-        print("log likelihood", log_likelihood[-1], "minimum_score", minimum_score)
+        all_conflict_dicts.append(conflict_dict)        
+        maximum_likelihood_points.append(sum(sll))
 
-
+        if DEBUG:
+            print("solution length", len(solution))
+            print("score ll", sum(sll))
+            print("i", i, "solution", solution, variants_file.split("/")[2])
+            print("log likelihood", round(log_likelihood[-1],4), "\n")
     #here we do something spciy. we look at the top few scores within 0.02 and see which then has the highest overall
-    sorted_scores = copy.deepcopy(all_minimum_scores)
+    sorted_scores = copy.deepcopy(maximum_likelihood_points)
     sorted_log_likelihoods = copy.deepcopy(all_model_log_likelihood)
-    zipped = list(zip(sorted_scores, sorted_log_likelihoods))
+    zipped = list(zip(sorted_log_likelihoods, sorted_scores))
     zipped.sort(reverse=True)
-    sorted_scores, sorted_log_likelihoods = zip(*zipped)
-    highest_score = sorted_scores[0]
+    sorted_log_likelihoods, sorted_scores = zip(*zipped)
+    highest_score = sorted_log_likelihoods[0]
     for i,(score, ll) in enumerate(zip(sorted_scores, sorted_log_likelihoods)):
-        if sorted_scores[0] - score < 0.02 and ll - sorted_log_likelihoods[0] > 75:
-            highest_score = score
-        loc = all_minimum_scores.index(score)
-        if i < 5:
-            print(score, new_solution_space[loc], all_model_log_likelihood[loc])
-    
+        loc = all_model_log_likelihood.index(ll)
+        print("score", score, all_saved_solutions[loc], "ll", round(all_model_log_likelihood[loc],4))
     sys.exit(0)
-
-    loc_best_model = all_minimum_scores.index(highest_score)
+    loc_best_model = all_model_likelihood.index(highest_score)
     log_likelihood = all_model_log_likelihood[loc_best_model]
-    solution = new_solution_space[loc_best_model]
+    solution = all_saved_solutions[loc_best_model]
     final_points = all_final_points[loc_best_model]
     gx = all_models[loc_best_model]
     conflict_dict = all_conflict_dicts[loc_best_model]
     assignments, scores, all_likelihoods  = gx.score(training_data)
      
     combination_solutions, combination_sums = generate_combinations(len(solution), solution)
-    combination_sums = [round(x,5) for x in combination_sums]
+    combination_sums = [round(x,freq_precision) for x in combination_sums]
     combination_solutions, combination_sums = filter_combinations(combination_solutions, combination_sums)
-
     print("best solution", solution)
+    print(np.unique(combination_sums, return_counts=True))
     autoencoder_dict = {}
-    tmp_universal_mutations = []
-
-    for um in universal_mutations:
-        tum = um[-1] + "_" + um[:-1]
-        if tum not in reference_positions:
-            tmp_universal_mutations.append(um)
-    universal_mutations = tmp_universal_mutations
     print("%s universal mutations found..." %len(universal_mutations))
     for s in solution:
         autoencoder_dict[s] = universal_mutations
-    
+    print(universal_mutations) 
     save_variants = []
     save_scores = []
 
     print("nucs:", len(new_nucs), "pos:", len(new_positions), "training data:", len(training_data))
-    for i, (point, assignment, score) in enumerate(zip(training_data, assignments, scores)):
+    for i, (point, assignment, score, all_score) in enumerate(zip(training_data, assignments, scores, all_likelihoods)):
         assignment = assignment[0]
         point = point[0]
 
@@ -551,58 +599,44 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
             continue
         save_variants.append(variant)
         save_scores.append(score)
-        location = combination_sums.index(assignment)       
-        print(variant, point, assignment, score)
-        print(conflict_dict[assignment])
+        location = combination_sums.index(assignment)
+        #print(variant, point, assignment, score, combination_solutions[location])
+        #print(conflict_dict[assignment])
+        #if variant == "22599A":
+        #    for sig, p, ass in zip(gx.sigma, gx.mu, all_score):
+        #        if ass > 0:
+        #            print(p, ass, sig)
         for individual in combination_solutions[location]:
             tmp_list = copy.deepcopy(autoencoder_dict[individual])
             tmp_list.append(variant)
             autoencoder_dict[individual] = tmp_list
-
-    counter = 0
-    check.sort()
-    check2.sort()
-    check3.sort()
-    check4.sort()
-    check5.sort()
-    check6.sort()
-
-    check_fail = []
-    check2_fail = []
-    check3_fail = []
-    check4_fail = []
-    check5_fail = []
-    check6_fail = []
     print(variants_file)
-    
-    for key, value in autoencoder_dict.items(): 
-        value.sort()
-        if counter == 0:
-            check_fail = [item for item in check if item not in value and item[:-1] not in low_depth_positions]
-            print("\n", key, check_fail)
-            print("extra", [item for item in value if item not in check and "-" not in item and item[:-1] not in low_depth_positions])
-        elif counter == 1:
-            check2_fail = [item for item in check2 if item not in value and item[:-1] not in low_depth_positions]
-            print("\n", key, check2_fail)
-            print("extra", [item for item in value if item not in check2 and "-" not in item and item[:-1] not in low_depth_positions])
-        elif counter == 2:
-            check3_fail = [item for item in check3 if item not in value and item[:-1] not in low_depth_positions]
-            print("\n", key, check3_fail)
-            print("\nextra", [item for item in value if item not in check3 and "-" not in item and item[:-1] not in low_depth_positions])
-        elif counter == 3:
-            check4_fail = [item for item in check4 if item not in value and item[:-1] not in low_depth_positions]
-            print("\n", key, check4_fail)
-            print("\nextra", [item for item in value if item not in check4 and "-" not in item and item[:-1] not in  low_depth_positions])
-        elif counter == 4:
-            check5_fail = [item for item in check5 if item not in value and item[:-1] not in low_depth_positions]
-            print("\n", key, check5_fail)
-            print("\nextra", [item for item in value if item not in check5 and "-" not in item and item[:-1] not in  low_depth_positions])
-        elif counter == 5:
-            check6_fail = [item for item in check6 if item not in value and item[:-1] not in low_depth_positions]
-            print("\n", key, check6_fail)
-            print("\nextra", [item for item in value if item not in check6 and "-" not in item and item[:-1] not in  low_depth_positions])
-           
-        counter += 1
+   
+    if DEBUG: 
+        counter = 0
+        check.sort()
+        check2.sort()
+        check3.sort()
+
+        check_fail = []
+        check2_fail = []
+        check3_fail = [] 
+        for key, value in autoencoder_dict.items(): 
+            value.sort()
+            if counter == 0:
+                check_fail = [item for item in check if item not in value and item[:-1] not in low_depth_positions]
+                print("\n", key, check_fail)
+                print("extra", [item for item in value if item not in check and "-" not in item and item[:-1] not in low_depth_positions])
+            elif counter == 1:
+                check2_fail = [item for item in check2 if item not in value and item[:-1] not in low_depth_positions]
+                print("\n", key, check2_fail)
+                print("extra", [item for item in value if item not in check2 and "-" not in item and item[:-1] not in low_depth_positions])
+            elif counter == 2:
+                check3_fail = [item for item in check3 if item not in value and item[:-1] not in low_depth_positions]
+                print("\n", key, check3_fail)
+                print("\nextra", [item for item in value if item not in check3 and "-" not in item and item[:-1] not in low_depth_positions])
+            counter += 1
+        
     print("low depth positions:", np.unique(low_depth_positions))
     tmp_dict = {"autoencoder_dict":autoencoder_dict, "log_likelihood": log_likelihood, "problem_positions":problem_positions, "low_depth_positions":low_depth_positions, "variants":save_variants, "scores":save_scores, "conflict_dict": conflict_dict}
     with open(text_file, "a") as bfile:
