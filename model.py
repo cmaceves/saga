@@ -398,10 +398,115 @@ def find_duplicate(solution):
         solution.sort(reverse=True)
         return(solution, True)
 
+def eliminate_solutions(solution_space, means):
+    """
+    Solutions must account for every peak in the mean.
+    """
+    means.sort()
+    means = [round(x, 5) for x in means]
+
+    #we want to find everything over 10%
+    accounted_points = [x for x in means if x > 0.05]
+    kept_solutions = []
+    for solution in solution_space:
+        #print(solution)
+        keep = True
+        combination_solutions, combination_sums = generate_combinations(len(solution), solution)
+        combination_sums = [round(x,5) for x in combination_sums]
+        combination_sums = np.array(combination_sums)
+        for mean in accounted_points:
+            idx = (np.abs(combination_sums - mean)).argmin()
+            match = combination_sums[idx]
+            if abs(match - mean) > 0.02:
+                keep = False
+                break
+        if keep:
+            #print(solution)
+            kept_solutions.append(solution)
+    return(kept_solutions)        
+              
+def expand_for_duplicates(solution_space, threshold=0.03):
+    new_solution_space = []    
+    for solution in solution_space:
+        summation = sum(solution)
+        solution = [round(x,5) for x in list(solution) if x > threshold]
+        diff = 1-summation
+         
+        if diff < 0.97 and diff > 0:
+            solution, include = find_duplicate(solution)
+            if include:
+                new_solution_space.append(solution)
+        else:
+            new_solution_space.append(solution)
+    return(new_solution_space)
+
+
+def parallel_train_models(solutions, training_data, freq_precision):
+    all_final_points, all_models, all_model_log_likelihood, all_conflict_dicts, maximum_likelihood_points \
+        = Parallel(n_jobs=20)(delayed(train_models)(solution, training_data, freq_precision) for solution in solutions)
+
+    return(all_final_points, all_models, all_model_log_likelihood, all_conflict_dicts, maxmimum_likelihood_points)
+
+def train_models(solution, training_data, freq_precision): 
+    tmp_solution = [x for x in solution if x > 0.03]
+    other_point = sum([x for x in solution if x <= 0.03])
+    if other_point > 0.01:
+        tmp_solution.append(other_point)
+    solution = tmp_solution
+    n = len(solution)
+    combination_solutions, combination_sums = generate_combinations(n, solution)
+    combination_sums = [round(x, freq_precision) for x in combination_sums]
+    combination_solutions, combination_sums = filter_combinations(combination_solutions, combination_sums)
+    conflict_dict = possible_conflicts(combination_sums, combination_solutions, solution)       
+    final_points = []
+    for j, tp in enumerate(combination_sums):
+        if j < len(solution):
+            pass
+        elif len(combination_solutions[j]) == 1:
+            pass
+        elif tp >= 1.0:
+            continue
+        elif tp in final_points:
+            continue
+        final_points.append(round(tp, freq_precision))
+    final_points_expand = np.expand_dims(final_points, axis=1)
+    gx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand)
+    gx.init_em(training_data)
+    num_iters = 100
+    log_likelihood = []
+    for e in range(num_iters):
+        gx.e_step()
+        gx.m_step()
+
+    ll = gx.log_likelihood(training_data)
+    log_likelihood.append(ll)
+    assignment, score, all_scores = gx.score(training_data)
+    sll = [np.log(x) for x,y in zip(score, training_data)]
+    major_cluster = 0
+    second_cluster = 0 
+    for a, s, ass, td  in zip(assignment, score, all_scores, training_data):
+        point = a[0]
+        idx = combination_sums.index(point)
+        sol = combination_solutions[idx]
+        if solution[0] in sol:
+            major_cluster += np.log(s)
+        if solution[1] in sol:
+            second_cluster += np.log(s)
+    """ 
+    if DEBUG:
+        print("major cluster", major_cluster, "second cluster", second_cluster)
+        print("sll", sum(sll))
+        print("final points", len(final_points))
+        print("solution length", len(solution))
+        print("i", i, "solution", solution, variants_file.split("/")[2])
+        print("log likelihood", round(log_likelihood[-1],4), "\n")
+    """
+    return(solution, final_points, gx, log_likelihood[-1], conflict_dict, sum(sll))
+
 def run_model(variants_file, output_dir, output_name, primer_mismatches=None, physical_linkage_file=None, freyja_file=None):
     freq_lower_bound = 0.0001
     freq_upper_bound = 0.95
-    solutions_to_train = 30
+    solutions_to_train = 3000
     training_lower_bound = 0.03
     freq_precision = 3 
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
@@ -435,22 +540,76 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
     refined_kde_peaks.sort(reverse=True)
     refined_kde_peaks = [round(x, freq_precision) for x in refined_kde_peaks]
     print("original refined", refined_kde_peaks)
-
     print("gt_centers", gt_centers)
-    n_clusters = list(np.arange(2,20))
+    
     aic_list = []
+    aic_means = []
     training_data = np.array([x for x in new_frequencies if x > training_lower_bound])
     tmp_reshape = np.array(training_data).reshape(-1,1)
+    n_clusters = list(np.arange(2, 30))
+   
+    for n_val in n_clusters:
+        gx = GaussianMixture(n_components = n_val)
+        gx.fit(tmp_reshape)
+        aic = gx.aic(tmp_reshape)
+        aic_list.append(aic)
+        aic_means.append(np.squeeze(gx.means_))
 
+    idx = aic_list.index(min(aic_list))
+    n = n_clusters[idx]
+    points_account_for = aic_means[idx]
+    print(n, points_account_for)
+    points_under_50 = [x for x in points_account_for if x < 0.5]
+    maximum_individual = len(points_under_50)
+    if maximum_individual < 11:
+        upper_bound = maximum_individual + 1
+    else:
+        upper_bound = 11
+
+    n_clusters = list(np.arange(2, upper_bound))
+    print(n_clusters)
+    solution_space = []    
     #THIS NEEDS TO BE CHANGED TO BE ESTIMATED IN ADVANCE
-    n = 9
-    n_clusters = [n]
     for n in n_clusters:
         n_solution = create_solution_space(refined_kde_peaks, n)
-        solution_space.extend(n_solution) 
+        solution_space.extend(n_solution)
+
     print("length of solution space", len(solution_space))
     new_solution_space = collapse_solution_space(solution_space, n_clusters=solutions_to_train) 
     print("length of collapse solution space", len(new_solution_space))
+    sol = eliminate_solutions(new_solution_space, points_account_for)
+    new_solution_space = sol
+    n_count = [0.0] * len(n_clusters)
+    for s in new_solution_space:
+        i = len(s)
+        try:
+            idx = n_clusters.index(i)
+            n_count[idx] += 1
+        except:
+            continue
+        #print(s)
+    
+    zipped = list(zip(n_count, n_clusters))
+    zipped.sort(reverse=True)
+    n_count, n_clusters = zip(*zipped)
+    total_count = sum(n_count)
+    keep_lengths = []
+    for a,b in zip(n_clusters, n_count):
+        if b/total_count > 0.20:
+            keep_lengths.append(a)
+    print("looking for solutions of ", keep_lengths, "lengths...")
+    keep_solutions = []
+    for sol in new_solution_space:
+        if len(sol) in keep_lengths:
+            keep_solutions.append(sol)
+    
+    percent = 0.20
+    print("total of %s solutions..." %(len(keep_solutions)))
+    explore = int(len(keep_solutions) * percent)
+    random.shuffle(keep_solutions)
+    print("exploring %s percent of the solution space which is %s solutions..." %(str(percent*100), str(explore)))
+    new_solution_space = keep_solutions[:explore]
+
     """
     G = file_util.parse_physical_linkage_file(physical_linkage_file, new_positions, \
             new_frequencies, \
@@ -475,7 +634,6 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
     all_conflict_dicts = []    
     maximum_likelihood_points = []
     all_saved_solutions = []
-    all_aic = []
     print("solution space contains %s solutions..." %len(new_solution_space))
     print("training models...")
    
@@ -492,79 +650,22 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
             tmp_universal_mutations.append(um)
     universal_mutations = tmp_universal_mutations
 
-    #fit a model for each possible solution 
-    for i, solution in enumerate(new_solution_space):        
-        tmp_solution = [x for x in solution if x > 0.03]
-        other_point = sum([x for x in solution if x <= 0.03])
-        if other_point > 0.01:
-            tmp_solution.append(other_point)
-        solution = tmp_solution
-        #print(solution)
-        #continue 
-        all_saved_solutions.append(solution)
-        n = len(solution)
-        combination_solutions, combination_sums = generate_combinations(n, solution)
-        combination_sums = [round(x, freq_precision) for x in combination_sums]
-        combination_solutions, combination_sums = filter_combinations(combination_solutions, combination_sums)
-        conflict_dict = possible_conflicts(combination_sums, combination_solutions, solution)       
-        final_points = []
-        for j, tp in enumerate(combination_sums):
-            if j < len(solution):
-                pass
-            elif len(combination_solutions[j]) == 1:
-                pass
-            elif tp >= 1.0:
-                continue
-            #duplicate populations
-            elif tp in final_points:
-                continue
-            final_points.append(round(tp, freq_precision))
-        final_points_expand = np.expand_dims(final_points, axis=1)
-        gx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand, name=variants_file)
-        gx.init_em(training_data)
-        num_iters = 60
-        log_likelihood = []
-        for e in range(num_iters):
-            gx.e_step()
-            gx.m_step()
+    #train the models
+    all_final_points, all_models, all_model_log_likelihood, all_conflict_dicts, maximum_likelihood_points \
+        = parallel_train_models(new_solution_space, training_data, freq_precision)
 
-        ll = gx.log_likelihood(training_data)
-        log_likelihood.append(ll)
-        assignment, score, all_scores = gx.score(training_data)
-        sll = [np.log(x) for x,y in zip(score, training_data) if y > 0.03]
-
-        
-        for a, s, ass, td  in zip(assignment, score, all_scores, training_data):
-            point = a[0]
-            idx = combination_sums.index(point)
-            sol = combination_solutions[idx]
-            #if td > 0.05 and td < 0.90:
-            #    print("assignment", point, "score", s, "point", td, np.log(s))
-        
-        #save relevant information
-        all_final_points.append(final_points)
-        all_models.append(gx)
-        all_model_log_likelihood.append(log_likelihood[-1])
-        all_conflict_dicts.append(conflict_dict)        
-        maximum_likelihood_points.append(sum(sll))
-
-        if DEBUG:
-            print("solution length", len(solution))
-            print("score ll", sum(sll))
-            print("i", i, "solution", solution, variants_file.split("/")[2])
-            print("log likelihood", round(log_likelihood[-1],4), "\n")
-    #here we do something spciy. we look at the top few scores within 0.02 and see which then has the highest overall
+    #get the best model
     sorted_scores = copy.deepcopy(maximum_likelihood_points)
     sorted_log_likelihoods = copy.deepcopy(all_model_log_likelihood)
-    zipped = list(zip(sorted_log_likelihoods, sorted_scores))
+    zipped = list(zip(sorted_scores, sorted_log_likelihoods))
     zipped.sort(reverse=True)
-    sorted_log_likelihoods, sorted_scores = zip(*zipped)
-    highest_score = sorted_log_likelihoods[0]
+    sorted_scores, sorted_log_likelihoods = zip(*zipped)
+    highest_score = sorted_scores[0]
     for i,(score, ll) in enumerate(zip(sorted_scores, sorted_log_likelihoods)):
         loc = all_model_log_likelihood.index(ll)
-        print("score", score, all_saved_solutions[loc], "ll", round(all_model_log_likelihood[loc],4))
-    sys.exit(0)
-    loc_best_model = all_model_likelihood.index(highest_score)
+        print(i, "score", score, all_saved_solutions[loc], "ll", round(all_model_log_likelihood[loc],4), len(all_saved_solutions[loc]))
+
+    loc_best_model = maximum_likelihood_points.index(highest_score)
     log_likelihood = all_model_log_likelihood[loc_best_model]
     solution = all_saved_solutions[loc_best_model]
     final_points = all_final_points[loc_best_model]
@@ -576,7 +677,6 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
     combination_sums = [round(x,freq_precision) for x in combination_sums]
     combination_solutions, combination_sums = filter_combinations(combination_solutions, combination_sums)
     print("best solution", solution)
-    print(np.unique(combination_sums, return_counts=True))
     autoencoder_dict = {}
     print("%s universal mutations found..." %len(universal_mutations))
     for s in solution:
