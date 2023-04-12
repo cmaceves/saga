@@ -4,7 +4,7 @@ import matplotlib.transforms as transforms
 from scipy.stats import multivariate_normal
 
 class GMM():
-    def __init__(self, k, dim, init_mu=None, init_sigma=None, init_pi=None):
+    def __init__(self, k, dim, init_mu=None, init_sigma=None, init_pi=None, name=None):
         '''
         Define a model with known number of clusters and dimensions.
         input:
@@ -17,6 +17,7 @@ class GMM():
             - init_pi: initial value of cluster weights (k,)
                        (default) equal value to all cluster i.e. 1/k
         '''
+        self.default_sigma = 0.001
         self.k = k
         self.dim = dim
         if(init_mu is None):
@@ -30,7 +31,8 @@ class GMM():
         if(init_pi is None):
             init_pi = np.ones(self.k)/self.k
         self.pi = init_pi
-   
+        if name is not None:
+            self.name = name   
     def init_em(self, X):
         '''
         Initialization for EM algorithm.
@@ -46,8 +48,14 @@ class GMM():
         E-step of EM algorithm.
         '''
         for i in range(self.k):
-            self.z[:, i] = self.pi[i] * multivariate_normal.pdf(self.data, mean=self.mu[i], cov=self.sigma[i])
+            if self.sigma[i][0][0] == 0 or str(self.sigma[i][0][0]) == 'nan':
+                self.sigma[i][0][0] = self.default_sigma
+            x = self.pi[i] * multivariate_normal.pdf(self.data, mean=self.mu[i], cov=self.sigma[i])
+            #fix possible nan
+            x = [a if str(a) != 'nan' else 0 for a in x]
+            self.z[:, i] = x
         self.z /= self.z.sum(axis=1, keepdims=True)
+                
     
     def m_step(self):
         '''
@@ -57,8 +65,9 @@ class GMM():
         self.pi = sum_z / self.num_points
         #self.mu = np.matmul(self.z.T, self.data)
         #self.mu /= sum_z[:, None]
+        d = np.expand_dims(self.data, axis=1)
         for i in range(self.k):
-            j = np.expand_dims(self.data, axis=1) - self.mu[i]
+            j = d - self.mu[i]
             s = np.matmul(j.transpose([0, 2, 1]), j)
             self.sigma[i] = np.matmul(s.transpose(1, 2, 0), self.z[:, i] )
             self.sigma[i] /= sum_z[i]
@@ -76,14 +85,9 @@ class GMM():
             tot = 0
             for i in range(self.k):
                 #if it's zero, set it to something negilbly small so the program doesn't break
-                if self.sigma[i][0][0] == 0:
-                    self.sigma[i][0][0] = 0.0000001
-                    print("here", self.sigma[i][0][0], self.pi[i])
-                try:
-                    x = self.pi[i] * multivariate_normal.pdf(d, mean=self.mu[i], cov=self.sigma[i])
-                except:
-                    print('this', self.sigma[i][0][0], self.pi[i], self.mu[i])
-                    sys.exit(0)
+                if self.sigma[i][0][0] == 0 or str(self.sigma[i][0][0]) == 'nan':
+                    self.sigma[i][0][0] = self.default_sigma
+                x = self.pi[i] * multivariate_normal.pdf(d, mean=self.mu[i], cov=self.sigma[i])                
                 tot += x
             ll.append(np.log(tot))
         return(np.sum(ll))
@@ -95,6 +99,8 @@ class GMM():
         for d in X:
             tmp = []
             for i in range(self.k):
+                if self.sigma[i][0][0] == 0:
+                    self.sigma[i][0][0] = self.default_sigma
                 x = self.pi[i] * multivariate_normal.pdf(d, mean=self.mu[i], cov=self.sigma[i])
                 tmp.append(x)
             all_like.append(tmp)
@@ -103,5 +109,3 @@ class GMM():
             idx = tmp.index(score)
             assignments.append(self.mu[idx])
         return(assignments, scores, all_like)
-
-

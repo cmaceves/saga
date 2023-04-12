@@ -442,14 +442,19 @@ def expand_for_duplicates(solution_space, threshold=0.03):
 
 
 def parallel_train_models(solutions, training_data, freq_precision):
-    all_final_points, all_models, all_model_log_likelihood, all_conflict_dicts, maximum_likelihood_points \
-        = Parallel(n_jobs=20)(delayed(train_models)(solution, training_data, freq_precision) for solution in solutions)
-
-    return(all_final_points, all_models, all_model_log_likelihood, all_conflict_dicts, maxmimum_likelihood_points)
+    #all_saved_solutions, all_final_points, all_models, all_model_log_likelihood, all_conflict_dicts, maximum_likelihood_points \
+    code = Parallel(n_jobs=20)(delayed(train_models)(solution, training_data, freq_precision) for solution in solutions)
+    all_saved_solutions = [x[0] for x in code]
+    all_final_points = [x[1] for x in code]
+    all_models = [x[2] for x in code]
+    all_model_log_likelihood = [x[3] for x in code]
+    all_conflict_dicts = [x[4] for x in code]
+    maxmimum_likelihood_points = [x[5] for x in code]
+    return(all_saved_solutions, all_final_points, all_models, all_model_log_likelihood, all_conflict_dicts, maxmimum_likelihood_points)
 
 def train_models(solution, training_data, freq_precision): 
     tmp_solution = [x for x in solution if x > 0.03]
-    other_point = sum([x for x in solution if x <= 0.03])
+    other_point = round(sum([x for x in solution if x <= 0.03]), freq_precision)
     if other_point > 0.01:
         tmp_solution.append(other_point)
     solution = tmp_solution
@@ -506,7 +511,7 @@ def train_models(solution, training_data, freq_precision):
 def run_model(variants_file, output_dir, output_name, primer_mismatches=None, physical_linkage_file=None, freyja_file=None):
     freq_lower_bound = 0.0001
     freq_upper_bound = 0.95
-    solutions_to_train = 3000
+    solutions_to_train = 6000
     training_lower_bound = 0.03
     freq_precision = 3 
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
@@ -603,7 +608,7 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
         if len(sol) in keep_lengths:
             keep_solutions.append(sol)
     
-    percent = 0.20
+    percent = 1.0
     print("total of %s solutions..." %(len(keep_solutions)))
     explore = int(len(keep_solutions) * percent)
     random.shuffle(keep_solutions)
@@ -651,7 +656,7 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
     universal_mutations = tmp_universal_mutations
 
     #train the models
-    all_final_points, all_models, all_model_log_likelihood, all_conflict_dicts, maximum_likelihood_points \
+    all_saved_solutions, all_final_points, all_models, all_model_log_likelihood, all_conflict_dicts, maximum_likelihood_points \
         = parallel_train_models(new_solution_space, training_data, freq_precision)
 
     #get the best model
