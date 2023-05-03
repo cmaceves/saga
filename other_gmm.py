@@ -2,9 +2,9 @@ import numpy as np
 from scipy import random
 import matplotlib.transforms as transforms
 from scipy.stats import multivariate_normal
-
+np.seterr(all="ignore")
 class GMM():
-    def __init__(self, k, dim, init_mu=None, init_sigma=None, init_pi=None, name=None):
+    def __init__(self, k, dim, init_mu=None, init_sigma=None, init_pi=None, name=None, solution=None, default_sigma=None):
         '''
         Define a model with known number of clusters and dimensions.
         input:
@@ -17,9 +17,15 @@ class GMM():
             - init_pi: initial value of cluster weights (k,)
                        (default) equal value to all cluster i.e. 1/k
         '''
-        self.default_sigma = 0.001
+        self.iteration = 0
+        if default_sigma is None:
+            self.default_sigma = 0.1
+        else:
+            self.default_sigma = default_sigma
         self.k = k
         self.dim = dim
+        if solution is not None:
+            self.solution = solution
         if(init_mu is None):
             init_mu = random.rand(k, dim)*20 - 10
         self.mu = init_mu
@@ -33,6 +39,8 @@ class GMM():
         self.pi = init_pi
         if name is not None:
             self.name = name   
+        self.sigma_reset = {}
+
     def init_em(self, X):
         '''
         Initialization for EM algorithm.
@@ -50,6 +58,11 @@ class GMM():
         for i in range(self.k):
             if self.sigma[i][0][0] == 0 or str(self.sigma[i][0][0]) == 'nan':
                 self.sigma[i][0][0] = self.default_sigma
+                if self.mu[i][0] not in self.sigma_reset:
+                    self.sigma_reset[self.mu[i][0]] = self.iteration
+                else:
+                    self.sigma_reset[self.mu[i][0]] = self.iteration
+                #print("h", self.solution, self.mu[i], self.iteration)
             x = self.pi[i] * multivariate_normal.pdf(self.data, mean=self.mu[i], cov=self.sigma[i])
             #fix possible nan
             x = [a if str(a) != 'nan' else 0 for a in x]
@@ -96,16 +109,20 @@ class GMM():
         all_like = []
         assignments = []
         scores = []
+        ll = []
         for d in X:
             tmp = []
+            tot = 0
             for i in range(self.k):
-                if self.sigma[i][0][0] == 0:
+                if self.sigma[i][0][0] == 0 or str(self.sigma[i][0][0]) == 'nan':
                     self.sigma[i][0][0] = self.default_sigma
                 x = self.pi[i] * multivariate_normal.pdf(d, mean=self.mu[i], cov=self.sigma[i])
                 tmp.append(x)
+                tot += x
+            ll.append(np.log(tot))
             all_like.append(tmp)
             score = max(tmp)
             scores.append(score)
             idx = tmp.index(score)
             assignments.append(self.mu[idx])
-        return(assignments, scores, all_like)
+        return(assignments, scores, all_like, ll)

@@ -53,32 +53,51 @@ def main():
     all_centers = []
     all_misplaced = []
     all_distance = []
-    for sample_id, lineages, freyja_file in zip(sample_ids, sample_lineages, sample_freyja):
-        #print("\n", sample_id, lineages, freyja_file)
-        try:
-            df = pd.read_csv(lineages)
-        except:
-            continue
-        #print(df)
-        gt_centers, gt_lineages = file_util.parse_freyja_file(freyja_file)
-        #print(gt_centers[:5], gt_lineages[:5])        
 
-    #sys.exit(0)
+    sample_hue = []
+    actual_center = []
+    predicted_center = []    
     for sample_id, freyja_file in zip(sample_ids, sample_freyja):
         path = os.path.join("./simulated_data_results", sample_id, "%s_model_results.txt" %sample_id)
+        if not os.path.isfile(path):
+            continue
         with open(path, "r") as mfile:
             for line in mfile:
                 line = line.strip()
                 model_dictionary = json.loads(line)
         gt_centers, gt_lineages = file_util.parse_freyja_file(freyja_file)
         gt_mut_dict = file_util.parse_usher_barcode(gt_lineages)
-        missing, extra, center, distance_to_second = top_group(model_dictionary, gt_mut_dict, gt_centers)
-        len_missing.append(len(missing))
-        len_extra.append(len(extra))
-        all_centers.append(center)
-        all_misplaced.append(len(missing)+len(extra))
-        all_distance.append(distance_to_second)
-        #sys.exit(0)
+        print(model_dictionary.keys())        
+        pt_center = list(model_dictionary['autoencoder_dict'].keys()) 
+        print("\n", sample_id)
+        print("predicted center", pt_center)
+        print("actual center", gt_centers)
+        print(model_dictionary['r_values'])
+        #print(model_dictionary['scores'])
+        #print(model_dictionary['variants'])
+        print(len([x for x in gt_centers if x > 0.01]))
+        print(sum([x for x in gt_centers if x < 0.01]))
+        continue 
+        #for center comparison figure
+        actual_center.extend(gt_centers)
+        predicted_center.extend(pt_center)
+        gt_centers = [round(x,3) for x in gt_centers]
+        print(gt_centers)
+        #print(model_dictionary.keys())
+        print(model_dictionary['log_likelihood'])
+        print(sample_id, [round(float(x), 3) for x in list(model_dictionary['autoencoder_dict'].keys())])
+        continue
+        #missing, extra, center, distance_to_second = top_group(model_dictionary, gt_mut_dict, gt_centers)
+        #len_missing.append(len(missing))
+        #len_extra.append(len(extra))
+        #all_centers.append(center)
+        #all_misplaced.append(len(missing)+len(extra))
+        #all_distance.append(distance_to_second)
+    sys.exit(0)
+    sns.set_style("whitegrid")
+    sns.scatterplot(x=actual_center, y=predicted_center, hue = sampel_hue)
+    plt.savefig('output.png')
+    sys.exit(0)
     df = pd.DataFrame({"center":all_centers, "misplaced":all_misplaced, "distance_to_second":all_distance})
     print(df)
     sns.set_style("whitegrid")

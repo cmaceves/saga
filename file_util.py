@@ -1,10 +1,91 @@
 import os
 import sys
+import pysam
 import itertools
 import numpy as np
 import pandas as pd
 import networkx as nx
 
+
+def parse_reference_sequence(ref_file="/home/chrissy/Desktop/sequence.fasta"):
+    reference_sequence = ""
+    with open(ref_file, "r") as rfile:
+        for line in rfile:
+            line = line.strip()
+            if line.startswith(">"):
+                continue
+            reference_sequence += line
+    return(reference_sequence)
+
+def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
+    reference_sequence = parse_reference_sequence()
+    problematic_positions = []
+    problematic_primers = []
+
+    samfile = pysam.AlignmentFile(bam_file, "rb")
+    primer_positions = parse_bed_file(bed_file)    
+    for i, primer in enumerate(primer_positions):
+        primer_left_count = [0] * (primer[1]-primer[0])
+        primer_left_mut = [0] * (primer[1]-primer[0])
+        primer_left_index = list(range(primer[0], primer[1]))
+
+        primer_right_count = [0] * (primer[3]-primer[2])
+        primer_right_mut = [0] * (primer[3]-primer[2])
+        primer_right_index = list(range(primer[2], primer[3]))
+        #deal with left primer
+        for read in samfile.fetch(contig, primer[1]-10, primer[1]+10):
+            ref_pos = read.get_reference_positions()
+            first_base = ref_pos[0]
+            align_start = read.query_alignment_start #start index in query of the first base NOT soft clipped
+            
+            if (first_base >= primer[1] - 10 and first_base <= primer[1] + 10) and not read.is_reverse:
+                query_seq = read.query_sequence
+                clipped_positions = list(range(first_base - align_start, first_base))
+                
+                soft_clipped_bases = query_seq[:align_start]
+                ref_sc = reference_sequence[first_base-align_start:first_base]
+               
+                for ref_nuc, sc_nuc, pos in zip(ref_sc, soft_clipped_bases, clipped_positions):
+                    if pos not in primer_left_index:
+                        continue
+                    idx = primer_left_index.index(pos)
+                    primer_left_count[idx] += 1
+                    if ref_nuc == sc_nuc:
+                        continue
+                    primer_left_mut[idx] += 1
+        #deal with right primer, yes this is repetitive
+        for read in samfile.fetch(contig, primer[2]-10, primer[2]+10):
+            ref_pos = read.get_reference_positions()
+            last_base = ref_pos[-1]
+            align_end = read.query_alignment_end #start index in query of the first base NOT soft clipped
+            if (last_base >= primer[2] - 10 and last_base <= primer[2] + 10) and read.is_reverse:
+                query_seq = read.query_sequence
+                clipped_positions = list(range(last_base, len(query_seq)+last_base))
+                soft_clipped_bases = query_seq[align_end:]
+                ref_sc = reference_sequence[last_base+1:last_base+(len(query_seq)-align_end)+1]
+                for ref_nuc, sc_nuc, pos in zip(ref_sc, soft_clipped_bases, clipped_positions):
+                    if pos not in primer_right_index:
+                        continue
+                    idx = primer_right_index.index(pos)
+                    primer_right_count[idx] += 1
+                    if ref_nuc == sc_nuc:
+                        continue
+                    primer_right_mut[idx] += 1
+        primer_left_per = [x/y if y > 5 else 0 for x,y in zip(primer_left_mut, primer_left_count)]
+        primer_right_per = [x/y if y > 5 else 0 for x,y in zip(primer_right_mut, primer_right_count)]
+        
+        for pos, per in zip(primer_right_index, primer_right_per):
+            if per > 0.50:
+                problematic_positions.append(pos)
+                if primer not in problematic_primers:
+                    problematic_primers.append(primer)
+        for pos, per in zip(primer_left_index, primer_left_per):
+            if per > 0.50:
+                problematic_positions.append(pos)
+                if primer not in problematic_primers:
+                    problematic_primers.append(primer)
+    
+    return(problematic_positions, problematic_primers)
 
 def parse_usher_barcode(lineages, usher_file = "/home/chrissy/Desktop/usher_barcodes.csv", return_ref=False):
     print("parsing usher barcodes...")
@@ -23,7 +104,7 @@ def parse_usher_barcode(lineages, usher_file = "/home/chrissy/Desktop/usher_barc
     return(l_dict)
 
 
-def parse_freyja_file(file_path, tolerance=0.97):
+def parse_freyja_file(file_path, tolerance=0.99):
     """
     Open freyja results .tsv file and get the ground truth lineages and frequencies.
     """
@@ -120,7 +201,37 @@ def parse_primer_mismatches(primer_mismatches):
 
     return(problem_positions)
 
-def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions=None):
+def parse_bed_file(bed_file):
+    """
+    Parse bed file and paired primers to defined amplicon start and end positions.
+    """
+    print("parsing bed file...")
+    primer_positions = []
+    primer_pairs = "/home/chrissy/Desktop/primer_pairs.tsv"
+    pdf = pd.read_table(primer_pairs, names=["left", "right"])
+    for i in range(len(pdf)):
+        primer_positions.append([0, 0, 0, 0])
+
+    with open(bed_file, "r") as bfile:
+        for line in bfile:
+            line = line.strip()
+            line_list = line.split("\t")
+            start = line_list[1]
+            end = line_list[2] 
+            name = line_list[3]
+            idx_l = pdf.index[pdf["left"] == name].tolist()
+            idx_r = pdf.index[pdf["right"] == name].tolist()
+            if len(idx_l) == 0 and len(idx_r) == 0:
+                continue
+            if len(idx_l) > 0:
+                primer_positions[idx_l[0]][0] = int(start)
+                primer_positions[idx_l[0]][1] = int(end)
+            if len(idx_r) > 0:
+                primer_positions[idx_r[0]][2] = int(start)
+                primer_positions[idx_r[0]][3] = int(end)
+    return(primer_positions)
+       
+def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions=None, bed_file=None, problem_primers = None):
     """
     Use the variants .tsv output from ivar to create a list of variants and frequencies for 
     downstream use.
@@ -130,6 +241,15 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
     frequency = []
     nucs = []
     depth = []
+    primer_positions = []
+    problem_amplicons = []
+
+    if problem_primers is not None:
+        for primer in problem_primers:
+            problem_amplicons.append([primer[0], primer[3]])
+
+    if bed_file is not None:
+        primer_positions = parse_bed_file(bed_file)
 
     df = pd.read_table(file_path)
 
@@ -150,8 +270,16 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
             low_depth_positions.append(str(p))
             continue
         if problem_positions is not None and int(p) in problem_positions:
-            continue
+            continue       
         f = float(row['ALT_FREQ'])
+
+        if bed_file is not None:
+            #here we check if this exists in a primer position
+            if f > 0.10:
+                tmp_p = int(p)
+                for amplicon in primer_positions:
+                    if amplicon[0] < tmp_p < amplicon[1] or amplicon[2] < tmp_p < amplicon[3]:
+                        problem_amplicons.append([amplicon[0], amplicon[3]])                 
         positions.append(p)
         frequency.append(round(f, frequency_precision))
         nucs.append(n)
@@ -163,11 +291,26 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
         else:
             loc = unique_pos.index(p)
             unique_freq[loc] += round(f, frequency_precision)
-               
+
     ref_freq = [1-x for x in unique_freq]
     frequency.extend(ref_freq)
     positions.extend(unique_pos)
     nucs.extend(ref_nucs)
 
     reference_variants = [str(n) + '_' + str(p) for p,n in zip(unique_pos, ref_nucs) if n != 0]
-    return(positions, frequency, nucs, low_depth_positions, reference_variants)
+    final_positions = [] 
+    final_frequency = []
+    final_nucs = []
+    for p, f, n in zip(positions, frequency, nucs):
+        tmp_p = int(p)
+        keep = True
+        for amplicon in problem_amplicons:
+            if amplicon[0] < tmp_p < amplicon[1]:
+                keep = False
+                break
+        if keep:
+            final_positions.append(p)
+            final_frequency.append(f)
+            final_nucs.append(n)
+    
+    return(final_positions, final_frequency, final_nucs, low_depth_positions, reference_variants)
