@@ -18,7 +18,7 @@ def parallel(sample_ids, all_files):
     code = Parallel(n_jobs=1)(delayed(train)(sample_id, data_folder) for sample_id, data_folder in zip(sample_ids, all_files))
 
 def train(sample_id, data_folder):
-    if "file_0" not in sample_id:
+    if "file_148" not in sample_id:
         return(1)
     variants_file = data_folder
     tmp = sample_id.split("_")[:2]
@@ -29,13 +29,14 @@ def train(sample_id, data_folder):
     output_name = sample_id
     output_fasta_name = "/home/chrissy/Desktop/saga_spike_in_results/%s/%s.fa" %(sample_id, sample_id)
     bed_file = "/home/chrissy/Desktop/sarscov2_v2_primers.bed"
-
+    bam_file = "/home/chrissy/Desktop/spike_in/%s_sorted.calmd.bam" %sample_id
     if not os.path.isdir(output_dir):
         os.system("mkdir %s" %output_dir)
     #else:
     #    return(1)
     print("creating results for ", sample_id)
-    exit_code = run_model(variants_file, output_dir, output_name, None, None, None, bed_file=bed_file)
+    exit_code = run_model(variants_file, output_dir, output_name, None, None, None, bed_file=bed_file, \
+        bam_file=bam_file)
     return(0)
     if exit_code == 1:
         return(1)

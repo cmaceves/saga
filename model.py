@@ -493,7 +493,7 @@ def define_useful_kde_peaks(kde_reshape, freq_precision=3, total_peaks=20):
             continue
         tmp_n.append(value)
     n_components = tmp_n
-
+    
     #first we get a fast estimate of peaks in data, looking at ranges of 10% frequency - the way these distribute tells you something about the data complexity
     cluster_model = GaussianMixture(n_components=n)
     cluster_model.fit(kde_reshape)
@@ -503,7 +503,7 @@ def define_useful_kde_peaks(kde_reshape, freq_precision=3, total_peaks=20):
     refined_kde_peaks = list(np.unique(refined_kde_peaks))    
     n = len(refined_kde_peaks)    
     alot_peaks = []
-    ranges = [[0,10], [10,20], [20,30], [30,40], [40,50], [50,60], [60,70], [70,80], [80, 90], [90, 100]]
+    ranges = [[0, 10], [10, 20], [20, 30], [30,40], [40,50], [50,60], [60,70], [70,80], [80, 90], [90, 100]]
     for r in ranges:
         count = 0
         for peak in refined_kde_peaks:
@@ -512,19 +512,14 @@ def define_useful_kde_peaks(kde_reshape, freq_precision=3, total_peaks=20):
         percent = count/n
         alot_peaks.append(percent)       
         print(r, round(percent,2), count)
-
-    complex_30_40 = alot_peaks[3]
-    complex_20_30 = alot_peaks[2]
-    complex_10_20 = alot_peaks[1]
-    complex_10 = alot_peaks[0]
-
-    if (complex_10_20 <= 0.10) and (complex_20_30 <= 0.10) and (complex_30_40 <= 0.10):
+    num_nonzero = np.count_nonzero(alot_peaks)
+    complexity_measure = (round(np.var(refined_kde_peaks), 5)/len(kde_reshape)) * 10000
+    if complexity_measure > 17:
         complexity = "low"
         total_peaks = 15
-    elif (complex_10 >= 0.20) and ((complex_20_30 >= 0.10 and complex_10_20 < 0.10) or (complex_10_20 >= 0.10 and complex_20_30 < 0.10)):
-        complexity = "high"
     else:
-        complexity = "extremely high"
+        complexity = "hard"
+
     all_peaks = []
     for r, percentage in zip(ranges, alot_peaks):
         if percentage == 0:
@@ -532,8 +527,10 @@ def define_useful_kde_peaks(kde_reshape, freq_precision=3, total_peaks=20):
         keep_peaks = round(total_peaks * percentage)
         if keep_peaks == 0:
             keep_peaks += 1
+        """
         if r[0] == 0 and complexity == "extremely high":
             keep_peaks += 5
+        """
         for n_comp in n_components:
             cluster_model = GaussianMixture(n_components=n_comp)
             cluster_model.fit(kde_reshape)
@@ -554,7 +551,7 @@ def define_useful_kde_peaks(kde_reshape, freq_precision=3, total_peaks=20):
     return(all_peaks, complexity)
 
                
-def run_model(variants_file, output_dir, output_name, primer_mismatches=None, physical_linkage_file=None, freyja_file=None, bed_file=None):
+def run_model(variants_file, output_dir, output_name, primer_mismatches=None, physical_linkage_file=None, freyja_file=None, bed_file=None, bam_file=None):
     freq_lower_bound = 0.0001
     freq_upper_bound = 0.98
     training_lower_bound = 0.03
@@ -565,7 +562,6 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
 
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
     r_values_file = os.path.join(output_dir, output_name+"_solutions.txt") 
-    bam_file = "/home/chrissy/Desktop/spike_in/file_0_sorted.calmd.bam"
     #bam_file = None
     problem_primers = None
     if bam_file is not None:
@@ -599,17 +595,17 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
             problem_positions, \
             bed_file, \
             problem_primers)
-    """    
+    print(len(frequency)) 
     for f,n,p in zip(frequency, nucs, positions):
         r_check = str(n) + "_" + str(p)
-        if r_check in reference_positions:
-            continue
-        else:
-            if f < 0.83 and f > 0.77:
-                var = str(p) + str(n)
-                print(f, n, p)
+        #if r_check in reference_positions:
+        #    continue
+        if f < 1 and f > 0.10:
+            var = str(p) + str(n)
+            print(f, n, p)
     sys.exit(0) 
-    """
+    
+
     #here we filter out really low data points, and data points we assume to be "universal mutations"
     new_frequencies = [round(x, freq_precision) for x in frequency if x > freq_lower_bound and x < freq_upper_bound]
 
@@ -627,7 +623,6 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
     refined_kde_peaks = [x for x in refined_kde_peaks if x >= 0.01]
     refined_kde_peaks.append(tmp)
     refined_kde_peaks.sort()
-    complexity ="low"
     print(refined_kde_peaks, len(refined_kde_peaks))
     print("complexity", complexity)
     if complexity == "high":
@@ -636,21 +631,21 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
     elif complexity == "low":
         r_max = 7
         lower_subtract = 0.30
+        error = 0.07
     elif complexity == "extremely high":
         r_min = 9
         return(1)
 
     refined_kde_peaks = [round(x, freq_precision) for x in refined_kde_peaks if x > 0]
     default_sigma = 1
-    print("default sigma", default_sigma)
     print("refined kde", refined_kde_peaks, len(refined_kde_peaks))
+    #sys.exit(0)
     #print("len gt centers over 3", len([x for x in gt_centers if x > 0.03]))
     #print("len gt centers over 1", len([x for x in gt_centers if x > 0.01]))
     #print("freq under 3", sum([x for x in gt_centers if x < 0.03]))    
 
     #create the dataset that we're going to actually use for training, filtering out more low level point
     training_data = np.array([x for x in new_frequencies if x > training_lower_bound])
-    #run a simple, off-the-shelf gmm to determine a set containing (1) individual peaks and (2) shared peaks and (3) cap r_max value
     if len(refined_kde_peaks) < r_max:
         r_max = len(refined_kde_peaks)
 
@@ -665,27 +660,24 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
     #here we assume that their might be exactly 1 totally hidden solution that accounts for the difference
     solution_space = find_masked_solution(solution_space, freq_precision)
     print("masked solution space length", len(solution_space))
+    yoyo = [0.82, 0.197, 0.045]
 
     #constraint #1 E(solution) ~= 1
-    solution_space, hidden_peaks = parallel_contract_solutions(solution_space, freq_precision, error=0.01)
+    solution_space, hidden_peaks = parallel_contract_solutions(solution_space, freq_precision, error=error)
     #constraint #1 E(solution) ~= 1
-    solution_space = parallel_expand_solutions(solution_space, freq_precision)    
+    solution_space = parallel_expand_solutions(solution_space, freq_precision, error=error)    
     print("length of expansive solution space", len(solution_space))
-
-
     #constraint #2 all means from original GMM must be accounted for
     #now eliminate solutions that fail to account for all peaks reported by the "preseed" GMM
-    solution_space = parallel_eliminate_solutions(solution_space, refined_kde_peaks)
     if complexity != "low":
+        solution_space = parallel_eliminate_solutions(solution_space, refined_kde_peaks)
         keep = [x for x in refined_kde_peaks if x < 0.10 and x > 0]
-        print(keep, sum(keep))
         other = []
         for sol in solution_space:
             tmp = [x for x in keep if x not in sol]
             if len(tmp) > 0:
                 continue
             other.append(sol)
-            print(sol)
         solution_space = other
     
     if complexity == "low":
@@ -695,8 +687,9 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
                 keep.append(solution)
         solution_space = keep
     r_values = range(r_min, r_max)  
+
     print("length of solution space accounting for individual/shared peak presence", len(solution_space))
-    if len(solution_space) > 100:
+    if len(solution_space) > 0:
         #here we determine a tighter rmin, rmax based on the number of solutions at each r value
         r_values = determine_r_values(solution_space, r_clusters)        
         print("looking for solutions of ", r_values, "lengths...")
@@ -861,9 +854,8 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
                 check3_fail = [item for item in check3 if item not in value and item[:-1] not in low_depth_positions]
                 print("\n", key, check3_fail)
                 print("extra", [item for item in value if item not in check3 and "-" not in item and item[:-1] not in low_depth_positions])
-            counter += 1
-        
-    tmp_dict = {"autoencoder_dict":autoencoder_dict, "problem_positions":problem_positions, "low_depth_positions":low_depth_positions, "variants":save_variants, "scores":save_scores, "conflict_dict": conflict_dict, "cluster_metrics": cluster_scores, "cluster_count":num_points, "r_values":r_values, "gt_center":gt_centers, "sigma_reset":gx.sigma_reset}
+            counter += 1    
+    tmp_dict = {"autoencoder_dict":autoencoder_dict, "problem_positions":problem_positions, "low_depth_positions":low_depth_positions, "variants":save_variants, "scores":save_scores, "conflict_dict": conflict_dict, "cluster_metrics": cluster_scores, "cluster_count":num_points, "r_values":r_values, "sigma_reset":gx.sigma_reset}
 
     with open(text_file, "w") as bfile:
         bfile.write(json.dumps(tmp_dict))

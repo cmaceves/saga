@@ -21,10 +21,13 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
     reference_sequence = parse_reference_sequence()
     problematic_positions = []
     problematic_primers = []
-
+    remove_pos_dict = {}
     samfile = pysam.AlignmentFile(bam_file, "rb")
     primer_positions = parse_bed_file(bed_file)    
+    query_names = [] #names of reads to remove from file
     for i, primer in enumerate(primer_positions):
+        if primer[0] != 28800:
+            continue
         primer_left_count = [0] * (primer[1]-primer[0])
         primer_left_mut = [0] * (primer[1]-primer[0])
         primer_left_index = list(range(primer[0], primer[1]))
@@ -44,7 +47,7 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
                 
                 soft_clipped_bases = query_seq[:align_start]
                 ref_sc = reference_sequence[first_base-align_start:first_base]
-               
+                read_mut_count = 0               
                 for ref_nuc, sc_nuc, pos in zip(ref_sc, soft_clipped_bases, clipped_positions):
                     if pos not in primer_left_index:
                         continue
@@ -52,7 +55,29 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
                     primer_left_count[idx] += 1
                     if ref_nuc == sc_nuc:
                         continue
+                    read_mut_count += 1
                     primer_left_mut[idx] += 1
+                    if read_mut_count >= 2:
+                        if read.query_alignment_sequence != reference_sequence[ref_pos[0]:ref_pos[-1]+1]:
+                            if read.query_name not in query_names: 
+                                query_names.append(read.query_name)
+                        
+                        for quer, re, p in zip(read.query_alignment_sequence, reference_sequence[ref_pos[0]:ref_pos[-1]+1], ref_pos):
+                            mate_read = samfile.mate(read)
+                            mate_ref_pos = mate_read.get_reference_positions()
+                            mate_query_seq = mate_read.query_alignment_sequence
+                            idx = mate_ref_pos.index(p)
+                            if quer != re and quer != "N":
+                                print(mate_query_seq[idx])
+                                print(quer, re, p)
+                                print(mate_ref_pos)
+                                print(read.query_name)
+                                sys.exit(0)
+                                p += 1
+                                if p not in remove_pos_dict:
+                                    remove_pos_dict[p] = {"A":0, "C":0, "G":0, "T":0}
+                                remove_pos_dict[p][quer] += 1
+     
         #deal with right primer, yes this is repetitive
         for read in samfile.fetch(contig, primer[2]-10, primer[2]+10):
             ref_pos = read.get_reference_positions()
@@ -63,6 +88,7 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
                 clipped_positions = list(range(last_base, len(query_seq)+last_base))
                 soft_clipped_bases = query_seq[align_end:]
                 ref_sc = reference_sequence[last_base+1:last_base+(len(query_seq)-align_end)+1]
+                read_mut_count = 0
                 for ref_nuc, sc_nuc, pos in zip(ref_sc, soft_clipped_bases, clipped_positions):
                     if pos not in primer_right_index:
                         continue
@@ -71,18 +97,45 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
                     if ref_nuc == sc_nuc:
                         continue
                     primer_right_mut[idx] += 1
-        primer_left_per = [x/y if y > 5 else 0 for x,y in zip(primer_left_mut, primer_left_count)]
-        primer_right_per = [x/y if y > 5 else 0 for x,y in zip(primer_right_mut, primer_right_count)]
+                    read_mut_count += 1
+                if read_mut_count >= 1:
+                    if read.query_alignment_sequence != reference_sequence[ref_pos[0]:ref_pos[-1]+1]:
+                        if read.query_name not in query_names: 
+                            query_names.append(read.query_name)
+                    
+                    for quer, re, p in zip(read.query_alignment_sequence, reference_sequence[ref_pos[0]:ref_pos[-1]+1], ref_pos):
+                        if quer != re and quer != "N":
+                            p += 1
+                            if p not in remove_pos_dict:
+                                remove_pos_dict[p] = {"A":0, "C":0, "G":0, "T":0}
+                            remove_pos_dict[p][quer] += 1
+                            
+        print(remove_pos_dict)                    
+        print(len(query_names))
+        primer_left_per = [round(x/y,2) if y > 5 else 0 for x,y in zip(primer_left_mut, primer_left_count)]
+        primer_right_per = [round(x/y,2) if y > 5 else 0 for x,y in zip(primer_right_mut, primer_right_count)]
         
-        for pos, per in zip(primer_right_index, primer_right_per):
-            if per > 0.50:
+        print("\n")
+        print(primer)
+        print(primer_left_per)
+        print(primer_left_count)
+        print(primer_right_per)
+        print(primer_right_index)
+        print(primer_right_count)
+        
+        for pos, per in zip(primer_right_index[:-1], primer_right_per[:-1]):
+            if per > 0.30:
                 problematic_positions.append(pos)
                 if primer not in problematic_primers:
+                    #print(primer, "right")
+                    #print(primer_right_per)
                     problematic_primers.append(primer)
         for pos, per in zip(primer_left_index, primer_left_per):
-            if per > 0.50:
+            if per > 0.30:
                 problematic_positions.append(pos)
                 if primer not in problematic_primers:
+                    #print(primer, "left")
+                    #print(primer_left_per)
                     problematic_primers.append(primer)
     
     return(problematic_positions, problematic_primers)
@@ -263,7 +316,6 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
     for index, row in df.iterrows():
         if "N" in row['ALT'] or "+" in row['ALT']:
             continue
-         
         p = row['POS']
         n = row['ALT']
         if int(row['TOTAL_DP']) < 50:
@@ -275,11 +327,13 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
 
         if bed_file is not None:
             #here we check if this exists in a primer position
-            if f > 0.10:
+            if f > 0.30:
                 tmp_p = int(p)
                 for amplicon in primer_positions:
                     if amplicon[0] < tmp_p < amplicon[1] or amplicon[2] < tmp_p < amplicon[3]:
-                        problem_amplicons.append([amplicon[0], amplicon[3]])                 
+                        tmp = [amplicon[0], amplicon[3]]
+                        if tmp not in problem_amplicons:
+                            problem_amplicons.append(tmp)                 
         positions.append(p)
         frequency.append(round(f, frequency_precision))
         nucs.append(n)
@@ -296,6 +350,11 @@ def parse_ivar_variants_file(file_path, frequency_precision=4, problem_positions
     frequency.extend(ref_freq)
     positions.extend(unique_pos)
     nucs.extend(ref_nucs)
+   
+    
+    #problem_amplicons = list(np.unique(problem_amplicons))
+    for pa in problem_amplicons:
+        print(pa)
 
     reference_variants = [str(n) + '_' + str(p) for p,n in zip(unique_pos, ref_nucs) if n != 0]
     final_positions = [] 
