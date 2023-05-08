@@ -19,7 +19,7 @@ def parallel(sample_ids, all_files):
 
 def train(sample_id, data_folder):
     ##if "SEARCH-63701" not in sample_id: #hard example, want to attempt
-    ##if "SEARCH-59774" not in sample_id: #easy example
+    if "SEARCH-59774" not in sample_id: #easy example
     ##if "SEARCH-63691" not in sample_id: #hard example, want to attempt
     ##if "SEARCH-59762" not in sample_id: #easy example
     ##if "SEARCH-63543" not in sample_id: #fail case "hard"

@@ -12,10 +12,10 @@ import itertools
 
 import numpy as np
 import pandas as pd
-import networkx as nx
+#import networkx as nx
 from scipy import spatial
 from joblib import Parallel, delayed
-from networkx.algorithms.components import connected_components
+#from networkx.algorithms.components import connected_components
 from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.neighbors import KernelDensity
@@ -512,15 +512,16 @@ def define_useful_kde_peaks(kde_reshape, freq_precision=3, total_peaks=20):
         percent = count/n
         alot_peaks.append(percent)       
         print(r, round(percent,2), count)
-    num_nonzero = np.count_nonzero(alot_peaks)
     complexity_measure = (round(np.var(refined_kde_peaks), 5)/len(kde_reshape)) * 10000
-    if complexity_measure > 17:
+    if complexity_measure > 16.5:
         complexity = "low"
         total_peaks = 15
     else:
         complexity = "hard"
-
     all_peaks = []
+    print(complexity_measure)
+    print(complexity)
+    sys.exit()
     for r, percentage in zip(ranges, alot_peaks):
         if percentage == 0:
             continue
@@ -562,11 +563,9 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
 
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
     r_values_file = os.path.join(output_dir, output_name+"_solutions.txt") 
-    #bam_file = None
     problem_primers = None
     if bam_file is not None:
-        problem_positions, problem_primers = file_util.parse_bam_depth_per_position(bam_file, bed_file)
-    
+        remove_pos_dict, problem_positions = file_util.parse_bam_depth_per_position(bam_file, bed_file)
     if freyja_file is not None:
         gt_centers, gt_lineages = file_util.parse_freyja_file(freyja_file)
         gt_mut_dict = file_util.parse_usher_barcode(gt_lineages)
@@ -584,27 +583,22 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
         print(target, "unique mutations", target_dict)
         sys.exit(0)
         """
-    if primer_mismatches is not None:
-        problem_positions = file_util.parse_primer_mismatches(primer_mismatches)
-        print("problem positions:", problem_positions)
-    else:
-        problem_positions = None
     positions, frequency, nucs, low_depth_positions, reference_positions = file_util.parse_ivar_variants_file(
             variants_file, \
             freq_precision, \
             problem_positions, \
             bed_file, \
-            problem_primers)
+            problem_primers, \
+            remove_pos_dict)
+     
     print(len(frequency)) 
     for f,n,p in zip(frequency, nucs, positions):
         r_check = str(n) + "_" + str(p)
         #if r_check in reference_positions:
         #    continue
-        if f < 1 and f > 0.10:
+        if f < 0.97 and f > 0.10:
             var = str(p) + str(n)
             print(f, n, p)
-    sys.exit(0) 
-    
 
     #here we filter out really low data points, and data points we assume to be "universal mutations"
     new_frequencies = [round(x, freq_precision) for x in frequency if x > freq_lower_bound and x < freq_upper_bound]
@@ -655,12 +649,10 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
     for r in r_clusters:
         r_solution = create_solution_space(refined_kde_peaks, r, lower_subtract=lower_subtract)
         solution_space.extend(r_solution)
-
     print("original solution space length", len(solution_space))
     #here we assume that their might be exactly 1 totally hidden solution that accounts for the difference
     solution_space = find_masked_solution(solution_space, freq_precision)
     print("masked solution space length", len(solution_space))
-    yoyo = [0.82, 0.197, 0.045]
 
     #constraint #1 E(solution) ~= 1
     solution_space, hidden_peaks = parallel_contract_solutions(solution_space, freq_precision, error=error)
@@ -855,6 +847,7 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
                 print("\n", key, check3_fail)
                 print("extra", [item for item in value if item not in check3 and "-" not in item and item[:-1] not in low_depth_positions])
             counter += 1    
+    sys.exit(1)
     tmp_dict = {"autoencoder_dict":autoencoder_dict, "problem_positions":problem_positions, "low_depth_positions":low_depth_positions, "variants":save_variants, "scores":save_scores, "conflict_dict": conflict_dict, "cluster_metrics": cluster_scores, "cluster_count":num_points, "r_values":r_values, "sigma_reset":gx.sigma_reset}
 
     with open(text_file, "w") as bfile:

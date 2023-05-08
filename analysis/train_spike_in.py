@@ -10,8 +10,8 @@ from generate_consensus import write_fasta
 from joblib import Parallel, delayed
 
 def main():
-    sample_ids = os.listdir("/home/chrissy/Desktop/spike_in_variants_saga")           
-    all_files = [os.path.join("/home/chrissy/Desktop/spike_in_variants_saga", x) for x in sample_ids]
+    sample_ids = os.listdir("/Users/caceves/Desktop/spike_in")           
+    all_files = [os.path.join("/Users/caceves/Desktop/spike_in", x) for x in sample_ids if x.endswith(".bam")]
     parallel(sample_ids, all_files)
 
 def parallel(sample_ids, all_files):
@@ -20,16 +20,17 @@ def parallel(sample_ids, all_files):
 def train(sample_id, data_folder):
     if "file_148" not in sample_id:
         return(1)
-    variants_file = data_folder
     tmp = sample_id.split("_")[:2]
     sample_id = "_".join(tmp)
     print(sample_id)
-    reference = "/home/chrissy/Desktop/saga/example_data/sequence.fasta" 
-    output_dir = "/home/chrissy/Desktop/saga_spike_in_results/" + sample_id
+    #sample_id = sample_id.replace(".untrimmed.bam","")
+    variants_file = "/Users/caceves/Desktop/spike_in/%s_sorted_variants.tsv" %sample_id
+    reference = "/Users/caceves/Desktop/sequence.fasta" 
+    output_dir = "/Users/caceves/Desktop/saga_spike_in_results/" + sample_id
     output_name = sample_id
-    output_fasta_name = "/home/chrissy/Desktop/saga_spike_in_results/%s/%s.fa" %(sample_id, sample_id)
-    bed_file = "/home/chrissy/Desktop/sarscov2_v2_primers.bed"
-    bam_file = "/home/chrissy/Desktop/spike_in/%s_sorted.calmd.bam" %sample_id
+    output_fasta_name = "/Users/caceves/Desktop/saga_spike_in_results/%s/%s.fa" %(sample_id, sample_id)
+    bed_file = "/Users/caceves/Desktop/sarscov2_v2_primers.bed"
+    bam_file = "/Users/caceves/Desktop/spike_in/%s_sorted.calmd.bam" %sample_id
     if not os.path.isdir(output_dir):
         os.system("mkdir %s" %output_dir)
     #else:
