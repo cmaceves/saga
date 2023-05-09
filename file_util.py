@@ -7,7 +7,7 @@ import pandas as pd
 #import networkx as nx
 from line_profiler import LineProfiler
 
-def parse_reference_sequence(ref_file="/Users/caceves/Desktop/sequence.fasta"):
+def parse_reference_sequence(ref_file="/home/chrissy/Desktop/sequence.fasta"):
     reference_sequence = ""
     with open(ref_file, "r") as rfile:
         for line in rfile:
@@ -216,85 +216,13 @@ def parse_freyja_file(file_path, tolerance=0.99):
         actual_lineages.append(str(l))
     return(actual_centers, actual_lineages)
 
-def parse_physical_linkage_file(filename, positions, frequencies, nucs):
-    print("parsing physical linkage file...")
-    #initialize a graph
-    G = nx.Graph()
-
-    with open(filename, "r") as pfile:
-        for line in pfile:
-            useful = False
-            #check if it's in our positions list
-            split_line = line.strip().split("\t")
-            #if there isn't more than 1 position who cares
-            if(len(split_line) < 2):
-                continue
-
-            for sl in split_line:
-                tmp_pos = int(sl.split("_")[1])
-                if tmp_pos in positions:
-                    useful = True
-                    break
-            if useful is True:
-                #handle the graph side of things
-                for sl in split_line:
-                    #get position
-                    tmp_n = sl.split("_")[0]
-                    tmp_pos = int(sl.split("_")[1])
-                    try:
-                        loc = -1
-                        for i,(p, n) in enumerate(zip(positions, nucs)):
-                            if tmp_n == n and tmp_pos == p:
-                                loc = i
-                        if loc == -1:
-                            tmp_freq = 0
-                        else:
-                            tmp_freq = frequencies[loc]
-                    except:
-                        tmp_freq = 0.0
-
-                    #check if it's already a node
-                    if G.has_node(sl) is False:
-                        G.add_nodes_from([(sl, {"frequency":str(tmp_freq)})])
-
-                #now that we have all nodes accounted for, add the path
-                #turn the list into a list of sets
-                list_of_edges = list(itertools.combinations(split_line, 2))
-                for edge in list_of_edges:
-                    if G.has_edge(edge[0], edge[1]) is False:
-                        G.add_edges_from([(edge[0], edge[1], {"count":"1"})])
-                    else:
-                        original_count = G[edge[0]][edge[1]]['count']
-                        G[edge[0]][edge[1]]['count'] = str(int(original_count) + 1)
-   
-    #nx.write_graphml(G,'g.xml')
-    return(G)
-
-def parse_primer_mismatches(primer_mismatches):
-    """
-    Given a primer mismatch text file parse out all the positions.
-    """
-    print("parsing primer mismatch file...")
-    df = pd.read_table(primer_mismatches)
-    temp_list = df['suspect_positions'].tolist()
-    problem_positions = []
-    for tl in temp_list:
-        if "_" in str(tl):
-            tl = tl.split("_")
-        else:
-            tl = [tl]
-        tl = [int(x) for x in tl]
-        problem_positions.extend(tl)
-
-    return(problem_positions)
-
 def parse_bed_file(bed_file):
     """
     Parse bed file and paired primers to defined amplicon start and end positions.
     """
     print("parsing bed file...")
     primer_positions = []
-    primer_pairs = "/Users/caceves/Desktop/primer_pairs.tsv"
+    primer_pairs = "/home/chrissy/Desktop/primer_pairs.tsv"
     pdf = pd.read_table(primer_pairs, names=["left", "right"])
     for i in range(len(pdf)):
         primer_positions.append([0, 0, 0, 0])

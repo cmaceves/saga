@@ -12,11 +12,9 @@ import itertools
 
 import numpy as np
 import pandas as pd
-#import networkx as nx
 from scipy import spatial
 from joblib import Parallel, delayed
-#from networkx.algorithms.components import connected_components
-from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
+from sklearn.mixture import GaussianMixture
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.neighbors import KernelDensity
 
@@ -483,13 +481,17 @@ def round_solution_space(solution_space, freq_precision):
 
 def define_useful_kde_peaks(kde_reshape, freq_precision=3, total_peaks=20):
     print("finding useful kde peaks...")
-    n = 50
+    n = int(len(kde_reshape) / 5)
+    if n < 20:
+        n = 20
+    print("length data", kde_reshape.shape)
+    print("n", n)
     if len(kde_reshape) < n:
         n = len(kde_reshape)
     n_components = [50, 45, 40, 35, 30, 25, 20, 15, 10]
     tmp_n = []
     for value in n_components:
-        if n < value:
+        if len(kde_reshape) < value:
             continue
         tmp_n.append(value)
     n_components = tmp_n
@@ -512,26 +514,26 @@ def define_useful_kde_peaks(kde_reshape, freq_precision=3, total_peaks=20):
         percent = count/n
         alot_peaks.append(percent)       
         print(r, round(percent,2), count)
-    complexity_measure = (round(np.var(refined_kde_peaks), 5)/len(kde_reshape)) * 10000
-    if complexity_measure > 16.5:
+    q3, fifty, q1, tenth = np.percentile(refined_kde_peaks, [75 , 50, 25, 10])
+    print('tenth', round(tenth,3))
+    print('q1', round(q1,3))
+    print("fifty", round(fifty,3))
+    print('q3', round(q3,3))
+
+    if q1 > 0.1 and (q3 > 0.90 or fifty > 0.5):
+        complexity = "lowest"
+    elif q3 > 0.90:
         complexity = "low"
-        total_peaks = 15
     else:
-        complexity = "hard"
-    all_peaks = []
-    print(complexity_measure)
+        complexity = "high"    
     print(complexity)
-    sys.exit()
+    sys.exit(0)
     for r, percentage in zip(ranges, alot_peaks):
         if percentage == 0:
             continue
         keep_peaks = round(total_peaks * percentage)
         if keep_peaks == 0:
             keep_peaks += 1
-        """
-        if r[0] == 0 and complexity == "extremely high":
-            keep_peaks += 5
-        """
         for n_comp in n_components:
             cluster_model = GaussianMixture(n_components=n_comp)
             cluster_model.fit(kde_reshape)
@@ -549,6 +551,7 @@ def define_useful_kde_peaks(kde_reshape, freq_precision=3, total_peaks=20):
     all_peaks = [round(x, freq_precision) for x in all_peaks]
     all_peaks = [x for x in list(np.unique(all_peaks)) if x > 0]
     all_peaks.sort()
+    sys.exit(0)
     return(all_peaks, complexity)
 
                
@@ -563,7 +566,10 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
 
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
     r_values_file = os.path.join(output_dir, output_name+"_solutions.txt") 
+
     problem_primers = None
+    problem_positions = None
+    remove_pos_dict = None
     if bam_file is not None:
         remove_pos_dict, problem_positions = file_util.parse_bam_depth_per_position(bam_file, bed_file)
     if freyja_file is not None:
@@ -620,10 +626,10 @@ def run_model(variants_file, output_dir, output_name, primer_mismatches=None, ph
     print(refined_kde_peaks, len(refined_kde_peaks))
     print("complexity", complexity)
     if complexity == "high":
-        r_min = 7
+        r_min = 5
         lower_subtract = 0.40
     elif complexity == "low":
-        r_max = 7
+        r_max = 5
         lower_subtract = 0.30
         error = 0.07
     elif complexity == "extremely high":
