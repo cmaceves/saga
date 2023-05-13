@@ -77,7 +77,7 @@ def write_fasta(autoencoder_dict, output_name, reference, problem_positions):
             else:
                 final_seq += ref_seq[i]
 
-        with open("%s" %output_name, "a") as ffile:
+        with open("%s" %output_name, "w") as ffile:
             ffile.write(">%s" %str(round(float(key),2)))
             ffile.write("\n")
             ffile.write(final_seq)

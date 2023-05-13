@@ -41,13 +41,103 @@ def remove_depth(read, remove_pos_dict, reference_sequence, ref_pos, query_seq):
             remove_pos_dict[p+1][quer] += 1
     return(remove_pos_dict)
 
-def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
+def parse_variants(bam_dict, bed_file, reference_file, depth_cutoff=50):
+    """
+    """
+    single_primers = bam_dict["single_primers"]
+    flagged_dist = bam_dict["flagged_dist"]
+    flagged_primers = bam_dict["flagged_primers"]
+    variants = bam_dict["variants"]
+
+    ambiguity_dict = {}
+    model_frequencies = []
+    low_depth_positions = []
+    primer_binding_issue = []    
+    reference_variants = []
+
+    primer_positions = parse_bed_file(bed_file)
+    reference_sequence = parse_reference_sequence(reference_file)
+
+    #look for low depth
+    for position, value in variants.items():
+        nuc_counts = value[1]
+        total_depth = sum(list(nuc_counts.values()))
+        if total_depth < depth_cutoff:
+            low_depth_positions.append(position)
+
+    #find primers with binding mutations
+    for position, value in variants.items():
+        if position in low_depth_positions:
+            continue
+        #its in a primer binding region
+        in_primer = False
+        for primer in primer_positions:
+            if primer[0] < int(position) < primer[1] or primer[2] < int(position) < primer[3]:
+                in_primer = True
+                break
+        if in_primer is False:
+            continue
+        #it doesn't match the nuc and occurs > 10%
+        nuc_frequency = value[0]
+        ref_nuc = reference_sequence[int(position)-1]
+        for nuc, freq in nuc_frequency.items():
+            if nuc == ref_nuc:
+                continue
+            if freq > 0.10:
+                amplicon = [primer[1], primer[2]]
+                if amplicon not in primer_binding_issue:
+                    primer_binding_issue.append(amplicon)
+                break
+    nucs = []
+    frequencies = []
+    positions = []
+    first_primer_index = [x[0] for x in primer_positions]
+    for position, value in variants.items():
+        nuc_frequency = value[0]
+        nuc_counts = value[1]
+        ref_nuc = reference_sequence[int(position)-1]
+        primer_issue = False
+        for primer in primer_binding_issue:
+            if int(primer[0]) < int(position) < int(primer[1]) and int(position) in single_primers:
+                primer_issue = True  
+                ambiguity_dict[position] = "primer_binding"
+                break
+        if primer_issue:
+            continue 
+        if int(position) in flagged_dist:
+            ambiguity_dict[position] = "amplicon_flux"
+            continue
+
+        flagged = False
+        for primer in flagged_primers:
+            idx = first_primer_index.index(primer)
+            amplicon = primer_positions[idx]
+            if amplicon[1] < int(position) < amplicon[2]:
+                flagged=True
+                ambiguity_dict[position] = "primer_mutation"
+                break
+        if flagged is True:
+            continue 
+        for nuc, freq in nuc_frequency.items():
+            if nuc == "N":
+                continue
+            if float(freq) == 0:
+                continue
+            frequencies.append(float(freq))
+            nucs.append(nuc)
+            positions.append(int(position))
+            if nuc == ref_nuc:
+                reference_variants.append(str(position) + "_" + nuc)
+    return(frequencies, nucs, positions, low_depth_positions, reference_variants, ambiguity_dict)
+
+def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_045512.2"):
     read_dict = []
     mut_dict = []
     reference_sequence = parse_reference_sequence()
     for i in range(1, len(reference_sequence)+1):       
         mut_dict.append({"A":[], "C":[], "G":[], "T":[], "N":[]})
         read_dict.append({"A":[], "C":[], "G":[], "T":[], "N":[]})
+                
 
     samfile = pysam.AlignmentFile(bam_file, "rb")
     primer_positions = parse_bed_file(bed_file)
@@ -58,17 +148,15 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
     messed_up_primers = {}
     all_primer_muts = [] 
     all_primer_names = []
+    
     for i, read in enumerate(samfile.fetch(contig)):
         if i % 100000 == 0:
             print(i)
         
-        #if i < 1500000 or i > 1600000:
+        #if i < 1500000 or i > 1800000:
         #    continue
         
         ref_pos = read.get_reference_positions()
-        #we have a deletion in the read
-        #if ref_pos != list(range(ref_pos[0], ref_pos[-1]+1)):
-        #    continue
         found = False
         if read.is_reverse: 
             last_base = ref_pos[-1]
@@ -81,21 +169,8 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
                     query_align_seq = read.query_alignment_sequence
                     #not touching reads with insertions
                     if len(query_align_seq) == len(reference_sequence[ref_pos[0]:ref_pos[-1]+1]): 
-                        for quer, p in zip(query_align_seq, ref_pos):
-                            
+                        for quer, p in zip(query_align_seq, ref_pos):                            
                             k = p + 1
-                            """
-                            n = ref_pos[i]
-                            if i > 0 and p-1 != n-1:
-                                i += 1
-                                if i >= len(ref_pos):
-                                    continue            
-                                re = reference_sequence[ref_pos[i]]
-                                mut_dict[k][quer].append(primer[0])
-                                read_dict[k][quer].append(name)
-
-                            else:
-                            """
                             mut_dict[k][quer].append(primer[0])
                             read_dict[k][quer].append(name)
 
@@ -142,13 +217,9 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
                     messed_up_primers[name] = mut_count
                     all_primer_muts.append(mut_count)
                     all_primer_names.append(primer[0])
+    
     percentile = 97 
-    eighty_five, ninty, ninty_five, ninty_seven, ninty_nine = np.percentile(all_primer_muts, [85, 90, 95, 97, 99])
-    print("85", eighty_five)
-    print("90", ninty)
-    print("95", ninty_five)
-    print("97", ninty_seven)
-    print("99", ninty_nine)
+    ninty_seven = np.percentile(all_primer_muts, [percentile])
     unique_primers, counts = np.unique(all_primer_names, return_counts=True)
     unique_primers = list(unique_primers)
     removal = [0] * len(unique_primers)
@@ -162,22 +233,33 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
     
     outliers = []
     flagged_primers = []
-    threshold = 1 
+    threshold = 3
     z_scores = np.abs(stats.zscore(percent_primer_mut))
     for z, ppm in zip(z_scores, percent_primer_mut):
+        idx = percent_primer_mut.index(ppm)
         if z > threshold:
             outliers.append(ppm)
-            idx = percent_primer_mut.index(ppm)
             flagged_primers.append(unique_primers[idx])
+
     flagged_dist = []
     single_primers= []
+    variants = {}
     for key, value in enumerate(mut_dict):
-        #if key != 27627 and key != 28461:
+        #if key != 27627 and key != 28698:
         #    continue 
         num_primers = []
+        nuc_counts = {"A":0, "C":0, "G":0, "T":0, "N":0}
         for k,v in value.items():
             num_primers.extend(v)
+            nuc_counts[k] += len(v)
+
         total_depth = len(num_primers)
+        nuc_freq = {}
+        for k,v in nuc_counts.items():
+            if total_depth > 0:
+                nuc_freq[k] = v/total_depth
+        
+        variants[key] = [nuc_freq, nuc_counts]
         num_primers = list(np.unique(num_primers))
         effective_num_primers = []
         tracking_depth = []
@@ -201,7 +283,6 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
                 if c > 10:
                     if u not in effective_num_primers:
                         effective_num_primers.append(u)
-
         if len(effective_num_primers) > 1:
             td = np.array(tracking_depth)
             if np.count_nonzero(td) == 0:
@@ -211,7 +292,7 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
             a[np.isnan(a)] = 0
             a = a.T 
             a = a[~np.all(a == 0, axis=1)]
-            threshold = 0.10
+            threshold = 0.05
             flag = False
             for i in range(a.shape[1]):
                 v = list(a[:,i])
@@ -222,19 +303,27 @@ def parse_bam_depth_per_position(bam_file, bed_file, contig="NC_045512.2"):
                 print(v)
                 print(dist)
             if flag:
+                print("dist flagged", key)
                 flagged_dist.append(key)
         else:
             single_primers.append(key)
+    #change types for json dump
+    flagged_primers = [int(x) for x in flagged_primers] 
+    z_scores = list(z_scores)
+    unique_primers = [int(x) for x in unique_primers]
     
-    tmp_dict = {"flagged_primers":flagged_primers, "flagged_dist":flagged_dist, "single_primers":single_primers}
-    with open("primer_issues.txt", "w") as bfile:
+    tmp_dict = {"flagged_primers":flagged_primers, "flagged_dist":flagged_dist, "single_primers":single_primers, \
+        "z_scores":z_scores, "percent_primer_mut":percent_primer_mut, "unique_primers":unique_primers, "variants":variants}
+    
+    with open(variants_json, "w") as bfile:
         bfile.write(json.dumps(tmp_dict))    
-    return(flagged_dist, flagged_primers, single_primers)
+    
+    return(tmp_dict)
 
 def parse_usher_barcode(lineages, usher_file = "/home/chrissy/Desktop/usher_barcodes.csv", return_ref=False):
     print("parsing usher barcodes...")
     barcode = pd.read_csv(usher_file)
-
+    
     #initialize dictionary for mutation pos
     l_dict = {}
     for l in lineages:
@@ -302,135 +391,3 @@ def parse_bed_file(bed_file):
                 primer_positions[idx_r[0]][2] = int(start)
                 primer_positions[idx_r[0]][3] = int(end)
     return(primer_positions)
-
-
-  
-def parse_ivar_variants_file(file_path, frequency_precision=4, bed_file=None, primer_dict=None):
-    """
-    Use the variants .tsv output from ivar to create a list of variants and frequencies for 
-    downstream use.
-    """
-    print("parsing ivar variants file...")
-    positions = []
-    frequency = []
-    nucs = []
-    primer_positions = []
-    problem_amplicons = []
-
-    if bed_file is not None:
-        primer_positions = parse_bed_file(bed_file)
-
-    df = pd.read_table(file_path)
-
-    low_depth_positions = []
-    reference_variants = []
-    call_ambiguity = []
-    #keep track of the reference positions/frequencies/nucs
-    unique_pos = []
-    unique_freq = []
-    ref_nucs = []
-
-    if primer_dict is not None:
-        single_primers = primer_dict["single_primers"]
-        flagged_dist = primer_dict["flagged_dist"]
-        flagged_primers = primer_dict["flagged_primers"]
-        per_messed = primer_dict["per_messed"]
-    
-    """
-    eighty_five, ninty, ninty_five, ninty_nine = np.percentile(per_messed, [85, 90, 95, 99])
-    print("85", eighty_five)
-    print("90", ninty)
-    print("95", ninty_five)
-    print("99", ninty_nine)
-    #sns.kdeplot(per_messed)
-    #plt.savefig("output.png") 
-    sys.exit(0) 
-    """
-    for index, row in df.iterrows():
-        #if it's a N, an insertion, or deletion we don't care
-        if "N" in row['ALT'] or "+" in row['ALT'] or "-" in row['ALT']:
-            continue
-        p = row['POS']
-        n = row['ALT']
-        ad = int(row['ALT_DP'])
-        rd = int(row['REF_DP'])
-        total_depth = int(row['TOTAL_DP']) 
-       
-        #depth too low 
-        if total_depth < 50:
-            low_depth_positions.append(str(p))
-            continue
-        f = float(row['ALT_FREQ'])
-
-        #this mutation heavily co-occurs with > 3 mutations in a primer binding site 
-        if int(p) in flagged_primers and f > 0.03 and f < 0.98:
-            print(p, n, round(f,2), "flagged primers")
-            call_ambiguity.append(p)
-            continue
-            
-        if bed_file is not None:
-            #here we check if this exists in a primer position
-            if f > 0.10:
-                tmp_p = int(p)
-                for amplicon in primer_positions:
-                    if amplicon[0] < tmp_p < amplicon[1] or amplicon[2] < tmp_p < amplicon[3]:
-                        tmp = [amplicon[1], amplicon[2]]
-                        if tmp not in problem_amplicons:
-                            print("problem amp", amplicon, p, n, round(f,2))
-                            problem_amplicons.append(tmp)       
-
-        positions.append(p)
-        frequency.append(round(f, frequency_precision))
-        nucs.append(n)
-        
-        if p not in unique_pos:
-            unique_pos.append(p)
-            unique_freq.append(round(f, frequency_precision))
-            ref_nucs.append(row['REF'])
-        else:
-            loc = unique_pos.index(p)
-            unique_freq[loc] += round(f, frequency_precision)
-
-    ref_freq = [1-x for x in unique_freq]
-    frequency.extend(ref_freq)
-    positions.extend(unique_pos)
-    nucs.extend(ref_nucs)
-        
-    for pa in problem_amplicons:
-        print(pa)
-    
-    reference_variants = [str(n) + '_' + str(p) for p,n in zip(unique_pos, ref_nucs) if n != 0]
-    final_positions = [] 
-    final_frequency = []
-    final_nucs = []
-    
-    for p, f, n in zip(positions, frequency, nucs):
-        tmp_p = int(p)
-        keep = True
-       
-        #mutation frequency affected, reason unknown
-        if tmp_p in flagged_dist:
-            call_ambiguity.append(tmp_p)
-            print("removing due to flagged dist...", tmp_p, n, round(f,2))
-            keep = False
-        else:
-        #primer binding issues affecting mutation frequency
-            for amplicon in problem_amplicons:
-                if amplicon[0] < tmp_p < amplicon[1]:
-                    if f > 0.03 and f < 0.98:
-                        print('h', tmp_p, round(f,2))
-                    if (tmp_p in single_primers):
-                        if f > 0.03 and f < 0.98:
-                            call_ambiguity.append(tmp_p)
-                            print("removing due to primer binding...", tmp_p, n, round(f,2), amplicon[0], amplicon[1])
-                        keep = False
-                        break
-        if keep:
-            final_positions.append(p)
-            final_frequency.append(f)
-            final_nucs.append(n)
-    call_ambiguity = list(np.unique(call_ambiguity))
-    call_ambiguity.sort()
-    print("call ambiguity", call_ambiguity)
-    print(flagged_dist)
-    return(final_positions, final_frequency, final_nucs, low_depth_positions, reference_variants)
