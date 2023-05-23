@@ -14,10 +14,12 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+
+from scipy import stats
 from scipy import spatial
 from joblib import Parallel, delayed
 from sklearn.mixture import GaussianMixture
-from sklearn.cluster import KMeans, MiniBatchKMeans
+from sklearn.cluster import MiniBatchKMeans
 from sklearn.neighbors import KernelDensity
 
 from line_profiler import LineProfiler
@@ -30,69 +32,7 @@ random.seed(10)
 np.random.seed(10)
 
 DEBUG=False
-
-def filter_combinations(combination_solutions, combination_sums):
-    #remove things where all signals > 0.03 are the same
-    filter_1_sol = []
-    filter_1_sum = []
-    zipped = list(zip(combination_sums, combination_solutions))
-    zipped.sort()
-    combination_sums, combination_solutions = zip(*zipped)
-    filter_1_sol.extend(combination_solutions[:10])
-    filter_1_sum.extend(combination_sums[:10])
-    counter = 0
-    for j, (sol, sm) in enumerate(zip(combination_solutions, combination_sums)):
-        if sm > 0.97:
-            continue
-        if sol in filter_1_sol:
-            continue
-        if len(sol) == 1:
-            filter_1_sol.append(sol)
-            filter_1_sum.append(sm)
-            continue
-
-        tmp_sm = [x for x in sol if x > 0.03]
-        tmp_sm.sort(reverse=True)
-        keep = True
-        for i, (s, z) in enumerate(zip(filter_1_sum, filter_1_sol)):                
-            #we've passed our room for matches
-            if s-sm > 0.03:
-                filter_1_sol.append(sol)
-                filter_1_sum.append(sm)
-                break
-            #we're way early
-            elif s-sm < -0.03:
-                continue
-            else:
-                #it's within a few percent and it shares all the same major peaks
-                tmp_s = [x for x in z if x > 0.03]
-                tmp_s.sort(reverse=True)
-                if tmp_s == tmp_sm:
-                    keep = False
-                    break
-
-                #lets check if they're really fing close
-                same = True
-                for a, b in zip(tmp_sm, tmp_s):
-                    if a == b:
-                        continue
-                    if abs(a-b) < 0.01:
-                        continue
-                    if abs(a-b) < a * 0.03:
-                        continue
-                    same = False
-                if same:
-                    keep = False
-                    break
-        if keep is True:
-            if sol not in filter_1_sol:
-                #we haven't seem a solution like this
-                filter_1_sol.append(sol)
-                filter_1_sum.append(sm)
-        counter += 1
-
-    return(filter_1_sol, filter_1_sum)
-    
+   
 def generate_combinations(n, solution):
 
     combination_solutions = []
@@ -299,7 +239,7 @@ def eliminate_solutions(solution, means, error=0.02):
 
 
 def parallel_train_models(solutions, training_data, freq_precision, default_sigma):
-    code = Parallel(n_jobs=30)(delayed(train_models)(solution, training_data, freq_precision, default_sigma) for solution in solutions)
+    code = Parallel(n_jobs=1)(delayed(train_models)(solution, training_data, freq_precision, default_sigma) for solution in solutions)
     all_saved_solutions = [x[0] for x in code]
     all_final_points = [x[1] for x in code]
     all_models = [x[2] for x in code]
@@ -307,7 +247,9 @@ def parallel_train_models(solutions, training_data, freq_precision, default_sigm
     maxmimum_likelihood_points = [x[4] for x in code]
     scores = [x[5] for x in code]
     assignments = [x[6] for x in code]
-    return(all_saved_solutions, all_final_points, all_models, all_conflict_dicts, maxmimum_likelihood_points, scores, assignments)
+    all_scores = [x[7] for x in code]
+    mean_diff = [x[8] for x in code]
+    return(all_saved_solutions, all_final_points, all_models, all_conflict_dicts, maxmimum_likelihood_points, scores, assignments, all_scores, mean_diff)
 
 def train_models(solution, training_data, freq_precision, default_sigma): 
     tmp_solution = [x for x in solution if x > 0.03]
@@ -315,7 +257,6 @@ def train_models(solution, training_data, freq_precision, default_sigma):
     if other_point > 0.01:
         tmp_solution.append(other_point)
     solution = tmp_solution
-    
     n = len(solution)
     combination_solutions, combination_sums = generate_combinations(n, solution)
     combination_sums = [round(x, freq_precision) for x in combination_sums]
@@ -334,7 +275,7 @@ def train_models(solution, training_data, freq_precision, default_sigma):
     final_points_expand = np.expand_dims(final_points, axis=1)
     gxx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand, solution=solution, default_sigma=default_sigma)
     gxx.init_em(training_data)
-
+    
     max_num_iters = 100
     useful_iterations = 100
     log_likelihood = []
@@ -355,22 +296,32 @@ def train_models(solution, training_data, freq_precision, default_sigma):
             gxx.m_step() 
     assignment, score, all_scores, ll = gxx.score(training_data)
     sll = [np.log(x) for x in score]
-  
-    sigma_reset = gxx.sigma_reset
-    
-    #print(solution, "sll", round(sum(sll),3), len(solution))
-    return(solution, final_points, gxx, conflict_dict, sum(sll), sll, assignment)
 
-def collapse_small_peaks(solution_space, freq_precision):
+    new_means = list(np.squeeze(gxx.mu))
+    new_means.sort(reverse=True)    
+    final_points.sort(reverse=True)
+    """
+    print("\n")
+    print("solution", solution)
+    print(new_means)
+    print(final_points)    
+    """
+    diff = [round(abs(x-y),2) for x,y in zip(new_means, final_points)]
+    #print(diff)
+    #print("mean diff", np.mean(diff))
+    mean_diff = np.mean(diff) 
+    return(solution, final_points, gxx, conflict_dict, sum(sll), sll, assignment, all_scores, mean_diff)
+
+def collapse_small_peaks(solution_space, freq_precision, collapse_value=0.03):
     """
     Iterate all solutions and collapse frequencies that occur < 0.03 into one bin, we simply don't need that level of resolution and it complicates the problem in an unnecessary way.
     """
     print("collapsing small peaks...")
     new_solution_space = []
     for solution in solution_space:
-        tmp = [x for x in solution if x < 0.03]
+        tmp = [x for x in solution if x < collapse_value]
         binned = round(sum(tmp),freq_precision)
-        solution = [round(x, freq_precision) for x in solution if x >= 0.03]
+        solution = [round(x, freq_precision) for x in solution if x >= collapse_value]
         if binned > 0.01:
             solution.append(binned)
         solution.sort(reverse=True)
@@ -393,14 +344,18 @@ def determine_r_values(solution_space, r_clusters):
     total_count = sum(r_count)
     keep_r = []
     idx = r_count.index(max(r_count))
-    
+     
     #in order to be considered, a r value must account for at least 20% of the solution space
     for a,b in zip(r_clusters, r_count):
         print(a, b)
+        if total_count == 0:
+            continue
         if b/total_count > 0.20:
             keep_r.append(a)
     if len(keep_r) == 0:
         for a,b in zip(r_clusters, r_count):
+            if total_count == 0:
+                continue
             if b/total_count > 0.15:
                 keep_r.append(a)
     #keep_r = [r_clusters[idx]]
@@ -481,39 +436,17 @@ def round_solution_space(solution_space, freq_precision):
         new_solution_space.append(solution)
     return(new_solution_space)
 
-def define_useful_kde_peaks(frequencies, kde_reshape, freq_precision=3, genome_length=29903):
+def define_useful_kde_peaks(frequencies, kde_reshape, complexity, freq_precision=3, genome_length=29903):
     print("finding useful kde peaks...")
     frequencies.sort()
 
-    clipped_frequencies = [x for x in frequencies if x < 0.97 and x > 0.03]
-    n = len(clipped_frequencies)
-    ninty, q3, fifty, q1, tenth = np.percentile(clipped_frequencies, [90, 75 , 50, 25, 10])
-    i = q3 - q1
-    """
-    print(n)
-    print('tenth', round(tenth,3))
-    print('q1', round(q1,3))
-    print("fifty", round(fifty,3))
-    print('q3', round(q3,3))
-    print('ninety', round(ninty, 3))
-    print("interquartile", i)
-    """
-    percent_mutated = (n / genome_length) * 100
-    print(percent_mutated)
-    if percent_mutated > 0.4:
-        complexity = "high"
-        total_peaks = 25
+    if complexity == "high":
+        total_peaks = 20
+    elif complexity == "low":
+        total_peaks = 15
     else:
-        #we either have few peaks below 10, or we have high spread with a high concentration > 0.90
-        if tenth > 0.10 or (i > 0.90 and fifty > 0.90):
-            complexity = "lowest"
-            total_peaks = 10
-        else:
-            complexity = "low"
-            total_peaks = 20
-    print(complexity)
-    n_components = [50, 45, 40, 35, 30, 25, 20, 15, 10]
-   
+        total_peaks = 10
+    n_components = [50, 45, 40, 35, 30, 25, 20, 15, 10, 5]
     n = len(kde_reshape)    
     alot_peaks = []
     all_peaks = []
@@ -532,31 +465,86 @@ def define_useful_kde_peaks(frequencies, kde_reshape, freq_precision=3, genome_l
         #print(r, round(percent,2), count, kp)
     for r, kp in zip(ranges, keep_peaks):
         if kp == 0:
-            kp += 1
+            continue
         for n_comp in n_components:
+            if n_comp >= len(kde_reshape):
+                continue
             cluster_model = GaussianMixture(n_components=n_comp)
             cluster_model.fit(kde_reshape)
             small_peaks = list(np.squeeze(np.array(cluster_model.means_)))
             small_peaks.sort(reverse=True)
             small_peaks = [round(x, freq_precision) for x in small_peaks]
             small_peaks = [x for x in small_peaks if x >= r[0]/100 and x < r[1]/100]
-            if len(small_peaks) <= kp:
+            #print(r, small_peaks, n_comp, kp)
+            if len(small_peaks) <= kp and n_comp != min(n_components):
                 all_peaks.extend(small_peaks) 
                 break
+            elif n_comp == min(n_components):
+                if len(small_peaks) == 0:
+                    small_peaks = prev
+                all_peaks.extend(small_peaks)
+                break
+            prev = copy.deepcopy(small_peaks)
         pf = [round(x,3) for x in small_peaks]
         pf.sort()   
-        #print(pf, r, kp)
     all_peaks = [round(x, freq_precision) for x in all_peaks]
     all_peaks = [x for x in list(np.unique(all_peaks)) if x > 0]
     all_peaks.sort()
-    return(all_peaks, complexity)
+    return(all_peaks)
                
+def create_complexity_estimate(total_mut_pos, ambiguity_dict):
+    """
+    """
+    length_total_mut = len([x for x in total_mut_pos if x > 0.001])
+    length_amb_mut = len(ambiguity_dict)
+    scaled_complexity_estimate = length_total_mut/(29903*3)
+    print("ambiguity length", length_amb_mut)
+    print("scaled_complexity_estimate", scaled_complexity_estimate)
+    if scaled_complexity_estimate < 0.20:
+        complexity = "extremely low"
+    elif scaled_complexity_estimate < 0.375:
+        complexity = "low"
+    else:
+        complexity = "high"
+    return(complexity)
+
+def train_single_model(final_points, solution, training_data, default_sigma):
+    final_points_expand = np.expand_dims(final_points, axis=1)
+    gxx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand, solution=solution, default_sigma=default_sigma, fixed_means=True)
+    gxx.init_em(training_data)
+    
+    max_num_iters = 100
+    useful_iterations = 100
+    log_likelihood = []
+    for e in range(max_num_iters):
+        gxx.iteration += 1
+        gxx.e_step()
+        gxx.m_step()
+        if len(gxx.sigma_reset) > 0:
+            useful_iterations = e
+            break
+    if max_num_iters != useful_iterations:
+        gxx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand, solution=solution, default_sigma=default_sigma, fixed_means=True)
+        gxx.init_em(training_data)
+        log_likelihood = []
+        for e in range(useful_iterations):
+            gxx.iteration += 1
+            gxx.e_step()
+            gxx.m_step() 
+    assignment, score, all_scores, ll = gxx.score(training_data)
+    sll = [np.log(x) for x in score]
+
+    new_means = list(np.squeeze(gxx.mu))
+    new_means.sort(reverse=True)    
+    final_points.sort(reverse=True)
+    print("new score", sum(sll))
+    return(gxx)
+
 def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyja_file=None):
     freq_lower_bound = 0.0001
     freq_upper_bound = 0.98
     training_lower_bound = 0.03
     freq_precision = 3
-    r_min = 2
     r_value_maxima = 31
     percent_solution_space = 0.01
     lower_subtract = 0.30
@@ -565,46 +553,36 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     r_values_file = os.path.join(output_dir, output_name+"_solutions.txt") 
 
     problem_primers = None
-    problem_positions = None
     remove_pos_dict = None
-
+    
     variants_json = os.path.join(output_dir, output_name+"_variants.txt")
+    
     if os.path.isfile(variants_json):
         with open(variants_json, "r") as rfile:
             primer_dict = json.load(rfile)
             bam_file = None
+    
     if bam_file is not None:
-        #lp = LineProfiler()
-        #lp_wrapper = lp(file_util.parse_bam_depth_per_position)
-        #lp_wrapper(bam_file, bed_file)
-        #lp.print_stats()
-        #sys.exit(0) 
         primer_dict = file_util.parse_bam_depth_per_position(bam_file, bed_file, variants_json)
+        return(1)
+    else:
+        return(1)
+    freyja_file = None
     if freyja_file is not None:
         gt_centers, gt_lineages = file_util.parse_freyja_file(freyja_file)
         gt_mut_dict = file_util.parse_usher_barcode(gt_lineages)
         print(gt_centers)
         print(gt_lineages)
-        """
-        target = "AY.3"
-        target_dict = gt_mut_dict[target]
-        for key, value in gt_mut_dict.items():
-            idx = gt_lineages.index(key)
-            if gt_centers[idx] < 0.03:
-                continue
-            tmp = [x for x in target_dict if x not in value]
-            target_dict = tmp
-        print(target, "unique mutations", target_dict)
-        sys.exit(0)
-        """
-    frequency, nucs, positions, low_depth_positions, reference_positions, ambiguity_dict = file_util.parse_variants(primer_dict, bed_file, reference_file)
-    
+    reference_sequence = file_util.parse_reference_sequence(reference_file)
+    primer_positions = file_util.parse_bed_file(bed_file)
+    frequency, nucs, positions, depth, low_depth_positions, reference_positions, ambiguity_dict, \
+        total_mutated_pos  = file_util.parse_variants(primer_dict, primer_positions, reference_sequence)
     """ 
-    zipped = list(zip(frequency, nucs, positions))
+    zipped = list(zip(frequency, nucs, positions, depth))
     zipped.sort()
-    frequency, nucs, positions = zip(*zipped) 
+    frequency, nucs, positions, depth = zip(*zipped) 
     print(len(frequency)) 
-    for f,n,p in zip(frequency, nucs, positions):
+    for f,n,p,d in zip(frequency, nucs, positions, depth):
         r_check = str(n) + "_" + str(p)
         #if r_check in reference_positions:
         #    continue
@@ -612,20 +590,36 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
             var = str(p) + str(n)
             print(round(f,3), n, p)
     sys.exit(0)
-    """ 
+    """
     #here we filter out really low data points, and data points we assume to be "universal mutations"
     new_frequencies = [round(x, freq_precision) for x in frequency if x > freq_lower_bound and x < freq_upper_bound]
+    
 
     #first, we do a kernel density estimate to find local maxmima
     kde_peaks = define_kde(new_frequencies)
     kde_peaks.sort(reverse=True)
-     
-    r_min = 2
-    r_max = 14
 
+    """
+    print("length of total mut pos", len(total_mutated_pos))
+    print("length ambiguity", len(ambiguity_dict.keys()))
+    tmp_dict = {"amb_length": len(ambiguity_dict), "mut_length":total_mutated_pos}
+    with open(text_file, "w") as bfile:
+        bfile.write(json.dumps(tmp_dict))
+        bfile.write("\n")    
+    return(0)
+    """
+    complexity = create_complexity_estimate(total_mutated_pos, ambiguity_dict)
+    r_min = 3
+    r_max = 14
+  
+    #if we have no data
+    if len(kde_peaks) == 0 or len(new_frequencies) == 0:
+        return(1)
+ 
     #second, we cluster the local maxmima into a useable solution set, and estimate the complexity
     kde_reshape = np.array(kde_peaks).reshape(-1,1)
-    refined_kde_peaks, complexity  = define_useful_kde_peaks(new_frequencies, kde_reshape)
+    refined_kde_peaks = define_useful_kde_peaks(new_frequencies, kde_reshape, complexity)
+
     tmp = sum([x for x in refined_kde_peaks if x < 0.01])
     refined_kde_peaks = [x for x in refined_kde_peaks if x >= 0.01]
     refined_kde_peaks.append(tmp)
@@ -633,14 +627,10 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     print(refined_kde_peaks, len(refined_kde_peaks))
     print("complexity", complexity)
     if complexity == "high":
-        r_min = 6
-        return(1)
-    elif complexity == "low":
-        r_max = 6
-        error = 0.07
-    elif complexity == "lowest":
-        r_max = 4
-        error = 0.07
+        r_min = 5
+        #return(1)
+    elif complexity == "low" or complexity == "extremely low":
+        r_max = 5
     elif complexity == "extremely high":
         r_min = 9
         return(1)
@@ -663,25 +653,14 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     #here we assume that their might be exactly 1 totally hidden solution that accounts for the difference
     solution_space = find_masked_solution(solution_space, freq_precision)
     print("masked solution space length", len(solution_space))
-
     #constraint #1 E(solution) ~= 1
     solution_space, hidden_peaks = parallel_contract_solutions(solution_space, freq_precision, error=error)
     #constraint #1 E(solution) ~= 1
     solution_space = parallel_expand_solutions(solution_space, freq_precision, error=error)    
     print("length of expansive solution space", len(solution_space))
     #constraint #2 all means from original GMM must be accounted for
-    #now eliminate solutions that fail to account for all peaks reported by the "preseed" GMM
-    if complexity != "low" and complexity != "lowest":
+    if complexity != "low" and complexity != "extremely low":
         solution_space = parallel_eliminate_solutions(solution_space, refined_kde_peaks)
-        keep = [x for x in refined_kde_peaks if x < 0.10 and x > 0]
-        other = []
-        for sol in solution_space:
-            tmp = [x for x in keep if x not in sol]
-            if len(tmp) > 0:
-                continue
-            other.append(sol)
-        solution_space = other
-
     solutions_to_train = 500   
     """ 
     if complexity == "low" or complexity == "lowest":
@@ -706,23 +685,20 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
                 keep_solutions.append(sol)
         print("total of %s solutions..." %(len(keep_solutions))) 
         solution_space = keep_solutions
+    if len(solution_space) == 0:
+        return(1)
     if len(solution_space) > solutions_to_train:
         solution_space = collapse_solution_space(solution_space, freq_precision, clusters=solutions_to_train) 
         print("length of collapsed solution space", len(solution_space))
-    
-    
- 
-    #if complexity != "low":
-    #    freq_precision = 2 
+
     #prior to acutal training, collapse down tiny peaks to make training more reasonable
-    solution_space = collapse_small_peaks(solution_space, freq_precision)
+    solution_space = collapse_small_peaks(solution_space, freq_precision, collapse_value = 0.05)
     training_data = [round(x, freq_precision) for x in training_data]
    
     #deduplicate the solution space
     keep = []
     for sol in solution_space:
-        if sol not in keep:
-            print(sol)
+        if sol not in keep and len(sol) > 2:
             keep.append(sol)
     solution_space = keep
     print("sol length after deduplication", len(solution_space))    
@@ -731,6 +707,9 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     for sol in solution_space:
         points += 1
         total += len(sol)
+    if points == 0:
+        print("MESSED UP POINTS", output_name)
+        return(1)
     r_average = total/points
     print("average r", r_average)
     r_values = [int(x) for x in r_values]
@@ -754,40 +733,75 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     training_data = np.expand_dims(training_data, axis=1)
     new_positions = [y for x,y in zip(frequency, positions) if float(x) > training_lower_bound and x < freq_upper_bound]
     new_nucs = [y for x,y in zip(frequency, nucs) if float(x) > training_lower_bound and float(x) < freq_upper_bound]
-    universal_mutations = [str(x)+str(y) for (x,y,z) in zip(positions, nucs, frequency) if float(z) > freq_upper_bound and str(y) != '0']
-    tmp_universal_mutations = []
-    for um in universal_mutations:
-        tum = um[-1] + "_" + um[:-1]
-        if tum not in reference_positions:
-            tmp_universal_mutations.append(um)
-    universal_mutations = tmp_universal_mutations
+    original_variants = [str(x)+y for x,y in zip(new_positions, new_nucs)]
 
     #train the models
     all_saved_solutions, all_final_points, all_models, all_conflict_dicts, \
-        maximum_likelihood_points, scores, assignments \
+        maximum_likelihood_points, scores, assignments, all_scores, mean_diff \
         = parallel_train_models(new_solution_space, training_data, freq_precision, default_sigma)
- 
+
     #get the best model
     sorted_scores = copy.deepcopy(maximum_likelihood_points)
-    sorted_scores.sort(reverse=True)
+    original_index = list(range(0, len(maximum_likelihood_points)))
+    zipped = list(zip(sorted_scores, original_index))
+    zipped.sort(reverse=True)
+    sorted_scores, original_index = zip(*zipped)    
+    
+    """ 
+    half_space = int(len(sorted_scores)/2)
+    sorted_scores = sorted_scores[:half_space]
+    original_index = original_index[:half_space]
+    """
 
-    all_sigma_resets = []
-    for i, ll in enumerate(sorted_scores):
-        if i < 10000:
-            loc = maximum_likelihood_points.index(ll)            
-            mm = all_models[loc]
-            print(i, "score", ll, all_saved_solutions[loc], len(all_saved_solutions[loc]))
-            all_sigma_resets.extend(list(mm.sigma_reset.keys()))
+    for i, (loc, ll) in enumerate(zip(original_index, sorted_scores)):
+        mm = all_models[loc]
+        a = assignments[loc]
+        s = scores[loc]
+        als = all_scores[loc]
+        for td, aa, sc, alls in zip(training_data, a, s, als):
+            diff = round(abs(td[0]-aa[0]),3)
+        print("\n", i, "score", ll, all_saved_solutions[loc], len(all_saved_solutions[loc]))
+        print("mean diff", mean_diff[loc])
+        new_means = list(np.squeeze(mm.mu))
+        print(new_means)
+    #sys.exit(0) 
     loc_best_model = maximum_likelihood_points.index(sorted_scores[0])
+    loc_best_model = mean_diff.index(min(mean_diff))
+    gx = all_models[loc_best_model]
+
+    initial_means = list(np.squeeze(gx.init_mu))
+    initial_means.sort()
+    final_means = list(np.squeeze(gx.mu))
+    final_means.sort()
+
+    diff = [abs(x-y) for x,y in zip(initial_means, final_means)]
+    keep_initial_means = [x for x,y in zip(initial_means, diff) if y < 0.05]
+    print("solution", all_saved_solutions[loc_best_model])
+    print("initial means", initial_means)
+    print("final means", final_means)
+    print("diff", diff)  
+
+    gx = train_single_model(keep_initial_means, all_saved_solutions[loc], training_data, default_sigma)
+
+    #sys.exit(0)
     solution = all_saved_solutions[loc_best_model]
     final_points = all_final_points[loc_best_model]
-    gx = all_models[loc_best_model]
+
+    #create a new dataset for actually assigning out variants
+    new_frequency, new_nucs, new_positions, add_low_depth_positions, universal_mutations = file_util.parse_additional_var(primer_dict, primer_positions, reference_sequence, ambiguity_dict, training_lower_bound, freq_upper_bound)
+    new_variants = [str(p) + str(n) for p,n in zip(new_positions, new_nucs)] 
+    assignment_data = np.array(new_frequency).reshape(-1,1)    
+ 
+    #TESTLINES
+    print([x for x in new_variants if x not in original_variants])
+    #sys.exit(0)
+    
     conflict_dict = all_conflict_dicts[loc_best_model]
-    assignments, scores, all_likelihoods, ll  = gx.score(training_data)
+    print("scoring new data points")
+    assignments, scores, all_likelihoods, ll  = gx.score(assignment_data)
  
     combination_solutions, combination_sums = generate_combinations(len(solution), solution)
     combination_sums = [round(x,freq_precision) for x in combination_sums]
-    #combination_solutions, combination_sums = filter_combinations(combination_solutions, combination_sums)
     print("best solution", solution)
     autoencoder_dict = {}
     print("%s universal mutations found..." %len(universal_mutations))
@@ -795,32 +809,66 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
         autoencoder_dict[s] = universal_mutations
     save_variants = []
     save_scores = []
-
-    cluster_scores = [0.0] * len(solution)
+    save_assignments = []
+    save_freq = []
+    save_combos = []
     num_points = [0.0] * len(solution)
-    for i, (point, assignment, score, all_score) in enumerate(zip(training_data, assignments, scores, all_likelihoods)):
+
+    single_assignment = {}
+    for s in solution:
+        single_assignment[s] = []
+    for i, (point, assignment, score, all_score) in enumerate(zip(assignment_data, assignments, scores, all_likelihoods)):     
         assignment = assignment[0]
         point = point[0]
         nuc = str(new_nucs[i])
-        if nuc == '0':
-            continue
         pos = str(new_positions[i])
         variant = pos+nuc
         if str(nuc) + "_"+ str(pos) in reference_positions:
             continue
+        location = combination_sums.index(assignment)
+        position = variant[:-1]
+        print("\n", variant, "score", score, "assign", assignment, "point", point, "combo", combination_solutions[location])              
+        dist = abs(point-assignment)
+        idx = np.abs(gx.mu - point).argmin()
+        print("distance from assignment", dist)
+        for al, m in zip(all_score, gx.mu):
+            print(al, m) 
+        if dist > 0.10 * point:
+            print("first condition met")
+            print(dist, point*0.50)            
+            if gx.mu[idx] != assignment: 
+                #find the cluster that's linearly closest to the point
+                new_assignment = float(gx.mu[idx])
+                other = combination_sums.index(new_assignment)
+                print("linear dist point", gx.mu[idx], combination_solutions[other])
+                #find the cluster that's second most likely
+                second_highest = max([x for x in all_score if x != max(all_score)])
+                other_idx = all_score.index(second_highest)
+                other_new_assignment = float(gx.mu[other_idx])
+                other_loc = combination_sums.index(other_new_assignment)
+                print("second most likely", other_new_assignment, combination_solutions[other_loc])
+                if other_new_assignment == new_assignment:
+                    assignment = new_assignment
+                    score = float(all_score[idx])
+                    location = combination_sums.index(assignment)
+                    print(assignment, score)  
         save_variants.append(variant)
         save_scores.append(score)
-        location = combination_sums.index(assignment)
-                
+        save_assignments.append(assignment)
+        save_freq.append(point)
+        save_combos.append(combination_solutions[location])
+        #if score < 0.001:
+        #    add_low_depth_positions.append(int(position))
+        #    continue           
+        if len(combination_solutions[location]) == 1:
+            single_assignment[assignment].append(point)
         for individual in combination_solutions[location]:
             idx = solution.index(individual)
-            cluster_scores[idx] += np.log(score)        
             num_points[idx] += 1
             tmp_list = copy.deepcopy(autoencoder_dict[individual])
             tmp_list.append(variant)
             autoencoder_dict[individual] = tmp_list
 
-    print(solution)
     if DEBUG: 
         counter = 0
         check.sort()
@@ -844,9 +892,9 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
                 check3_fail = [item for item in check3 if item not in value and item[:-1] not in low_depth_positions]
                 print("\n", key, check3_fail)
                 print("extra", [item for item in value if item not in check3 and "-" not in item and item[:-1] not in low_depth_positions])
-            counter += 1    
-    tmp_dict = {"autoencoder_dict":autoencoder_dict, "problem_positions":problem_positions, "low_depth_positions":low_depth_positions, "variants":save_variants, "scores":save_scores, "conflict_dict": conflict_dict, "cluster_metrics": cluster_scores, "cluster_count":num_points, "r_values":r_values, "sigma_reset":gx.sigma_reset}
-
+            counter += 1   
+         
+    tmp_dict = {"autoencoder_dict":autoencoder_dict,"low_depth_positions":add_low_depth_positions, "variants":save_variants, "scores":save_scores, "assignments": save_assignments, "conflict_dict": conflict_dict, "r_values":r_values, "ambiguity_dict":ambiguity_dict, "all_trained_solutions": new_solution_space, "assignment_data":new_frequency}
     with open(text_file, "w") as bfile:
         bfile.write(json.dumps(tmp_dict))
         bfile.write("\n")    
