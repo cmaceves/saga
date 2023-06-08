@@ -5,8 +5,10 @@ import os
 import sys
 import copy
 import math
+import scipy
 import time
 import json
+import pickle
 import random
 import itertools
 
@@ -31,8 +33,54 @@ from other_gmm import GMM
 random.seed(10)
 np.random.seed(10)
 
-DEBUG=False
-   
+DEBUG=False   
+
+
+def determine_consensus_call(assignment_data, assignments, scores, all_likelihoods, autoencoder_dict, new_nucs, new_positions,combination_sums, combination_solutions, reference_positions):
+    """
+    Given a set of sequences, determine what we call consensus on.
+    """
+    removal_dict = {}
+    for k,v in autoencoder_dict.items():
+        removal_dict[k] = []
+    for i, (point, assignment, score, all_like) in enumerate(zip(assignment_data, assignments, scores, all_likelihoods)):
+        point = point[0]
+        assignment = assignment[0]
+        nuc = str(new_nucs[i])
+        pos = str(new_positions[i])
+        variant = pos+nuc
+
+        if pos+"_"+nuc in reference_positions:
+            continue
+        location = combination_sums.index(assignment)
+        combo_sol = combination_solutions[location]      
+        all_like = [round(x,3) for x in all_like]
+        combo_sol_copy = copy.deepcopy(combination_solutions)
+        zipped = list(zip(all_like, combo_sol_copy))
+        zipped.sort(reverse=True)
+        all_like, combo_sol_copy = zip(*zipped)
+        
+        if all_like[1] == 0:
+            continue
+        ratio = all_like[0] / all_like[1]
+
+        #we cannot concretely assign this point
+        if ratio < 5:
+            diff_assignment = [x for x in combo_sol_copy[0] if x not in combo_sol_copy[1]]  
+            #if we can say it definitly belongs to one population at least
+            for difference in diff_assignment:            
+                removal_dict[difference].append(variant)   
+            continue
+        
+        for cs in combo_sol:
+            if variant not in autoencoder_dict[cs]:
+                autoencoder_dict[cs].append(variant)
+    no_call = []
+    for k,v in removal_dict.items():
+        if len(v) > 0:
+            no_call.append(k)
+    return(removal_dict, autoencoder_dict, no_call)          
+            
 def generate_combinations(n, solution):
 
     combination_solutions = []
@@ -49,18 +97,39 @@ def generate_combinations(n, solution):
 
     return(combination_solutions, combination_sums)
 
-def define_kde(frequencies, bw=0.0001, round_decimal=4, num=3000):
+def define_kde(frequencies, complexity, num, bw=0.0001, round_decimal=3):
     x = np.array(frequencies)
     x_full = x.reshape(-1, 1)
-    eval_points = np.linspace(np.min(x_full), np.max(x_full), num=num)
+    eval_points = np.linspace(min(x), max(x), num=num)
     kde = KernelDensity(kernel='gaussian', bandwidth=bw).fit(x_full)
+    #sys.exit(0)
     a = np.exp(kde.score_samples(eval_points.reshape(-1,1)))
     peaks = a[1:-1][np.diff(np.diff(a)) < 0]
     ind = [i for i,xx in enumerate(a) if xx in peaks]
     peak = []
+    peak_list = list(peaks)
+    #print(peak_list)
+    #print(ind)
+    num = 50
+    tmp = copy.deepcopy(peak_list)
+    tmp.sort(reverse=True)
+    keep_tmp = []
+    for t in tmp:
+        idx = peak_list.index(t)
+        ev = eval_points[list(a).index(peak_list[idx])]
+        if round(ev, round_decimal) != 0:
+            keep_tmp.append(t)
+        if len(keep_tmp) == num:
+            break
+    tmp = keep_tmp
     for i, xx in enumerate(eval_points):
         if i in ind:
-            peak.append(round(xx, round_decimal))
+            idx = ind.index(i)
+            if peak_list[idx] in tmp:
+                tmp.remove(peak_list[idx])
+                peak.append(round(xx, round_decimal))
+    #print(peak, len(peak))
+    #sys.exit(0)
     return(peak)
 
 def create_solution_space(peaks, r, lower_subtract=0.40):
@@ -93,32 +162,6 @@ def create_solution_space(peaks, r, lower_subtract=0.40):
             continue
         overlapping_sets.append(subset)
     return(overlapping_sets)
-
-def possible_conflicts(combination_sums, combination_solutions, solution):
-    """
-    Where do peaks conflict, what constitutes those conflicts?
-    """
-    #initialize
-    conflict_dict = {}
-    for csum in combination_sums:
-        conflict_dict[csum] = []
-    
-    for i, (csum, csol) in enumerate(zip(combination_sums, combination_solutions)):
-        csol = list(csol)
-        for j, (csum2, csol2) in enumerate(zip(combination_sums, combination_solutions)):
-            #identity
-            if i == j:
-                continue
-            csol2 = list(csol2)
-            if abs(csum - csum2) < 0.01:               
-                misfire = [x for x in csol if x not in csol2]
-                misfire.extend([x for x in csol2 if x not in csol])
-                misfire.sort()
-                current_list = conflict_dict[csum]                
-                current_list.append({csum2:misfire})                
-                conflict_dict[csum] = current_list
-
-    return(conflict_dict)
 
 def collapse_solution_space(solution_space, freq_precision, clusters=50, error=0.03):
     print("collapsing solution space...")
@@ -238,20 +281,19 @@ def eliminate_solutions(solution, means, error=0.02):
         return(None)
 
 
-def parallel_train_models(solutions, training_data, freq_precision, default_sigma):
-    code = Parallel(n_jobs=1)(delayed(train_models)(solution, training_data, freq_precision, default_sigma) for solution in solutions)
+def parallel_train_models(solutions, training_data, freq_precision, default_sigma, positions):
+    code = Parallel(n_jobs=10)(delayed(train_models)(solution, training_data, freq_precision, default_sigma, positions) for solution in solutions)
     all_saved_solutions = [x[0] for x in code]
     all_final_points = [x[1] for x in code]
     all_models = [x[2] for x in code]
-    all_conflict_dicts = [x[3] for x in code]
-    maxmimum_likelihood_points = [x[4] for x in code]
-    scores = [x[5] for x in code]
-    assignments = [x[6] for x in code]
-    all_scores = [x[7] for x in code]
-    mean_diff = [x[8] for x in code]
-    return(all_saved_solutions, all_final_points, all_models, all_conflict_dicts, maxmimum_likelihood_points, scores, assignments, all_scores, mean_diff)
+    maxmimum_likelihood_points = [x[3] for x in code]
+    scores = [x[4] for x in code]
+    assignments = [x[5] for x in code]
+    all_scores = [x[6] for x in code]
+    all_aic = [x[7] for x in code]
+    return(all_saved_solutions, all_final_points, all_models, maxmimum_likelihood_points, scores, assignments, all_scores, all_aic)
 
-def train_models(solution, training_data, freq_precision, default_sigma): 
+def train_models(solution, training_data, freq_precision, default_sigma, positions): 
     tmp_solution = [x for x in solution if x > 0.03]
     other_point = round(sum([x for x in solution if x <= 0.03]), freq_precision)
     if other_point > 0.01:
@@ -260,7 +302,6 @@ def train_models(solution, training_data, freq_precision, default_sigma):
     n = len(solution)
     combination_solutions, combination_sums = generate_combinations(n, solution)
     combination_sums = [round(x, freq_precision) for x in combination_sums]
-    conflict_dict = possible_conflicts(combination_sums, combination_solutions, solution)       
     final_points = []
     for j, (tp, sol) in enumerate(zip(combination_sums, combination_solutions)):
         if j < len(solution):
@@ -273,9 +314,8 @@ def train_models(solution, training_data, freq_precision, default_sigma):
             continue
         final_points.append(round(tp, freq_precision))
     final_points_expand = np.expand_dims(final_points, axis=1)
-    gxx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand, solution=solution, default_sigma=default_sigma)
-    gxx.init_em(training_data)
-    
+    gxx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand, solution=solution, default_sigma=default_sigma, fixed_means=True)
+    gxx.init_em(training_data, positions, combination_solutions, combination_sums)
     max_num_iters = 100
     useful_iterations = 100
     log_likelihood = []
@@ -286,31 +326,21 @@ def train_models(solution, training_data, freq_precision, default_sigma):
         if len(gxx.sigma_reset) > 0:
             useful_iterations = e
             break
-    if max_num_iters != useful_iterations:
-        gxx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand, solution=solution, default_sigma=default_sigma)
-        gxx.init_em(training_data)
+   
+    if max_num_iters != useful_iterations-1:
+        gxx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand, solution=solution, default_sigma=default_sigma, fixed_means=True)
+        gxx.init_em(training_data, positions, combination_solutions, combination_sums)
         log_likelihood = []
         for e in range(useful_iterations):
             gxx.iteration += 1
             gxx.e_step()
             gxx.m_step() 
-    assignment, score, all_scores, ll = gxx.score(training_data)
+    
+    assignment, score, all_scores, ll = gxx.other_score(training_data, positions)
     sll = [np.log(x) for x in score]
-
-    new_means = list(np.squeeze(gxx.mu))
-    new_means.sort(reverse=True)    
+    aic = (2 * len(final_points)) - (2 * sum(sll))
     final_points.sort(reverse=True)
-    """
-    print("\n")
-    print("solution", solution)
-    print(new_means)
-    print(final_points)    
-    """
-    diff = [round(abs(x-y),2) for x,y in zip(new_means, final_points)]
-    #print(diff)
-    #print("mean diff", np.mean(diff))
-    mean_diff = np.mean(diff) 
-    return(solution, final_points, gxx, conflict_dict, sum(sll), sll, assignment, all_scores, mean_diff)
+    return(solution, final_points, gxx, sum(sll), sll, assignment, all_scores, aic)
 
 def collapse_small_peaks(solution_space, freq_precision, collapse_value=0.03):
     """
@@ -408,8 +438,6 @@ def find_hidden_population(solution, error, freq_precision):
             hidden_peaks.append(new_peak)
             tmp.sort(reverse=True)
             new_solutions[i] = tmp
-            if 0.787 in new_solutions[i]:
-                print(tmp, new_peak, old_peak, duplicate, diff)
         return(new_solutions, True, hidden_peaks)
 
 def find_masked_solution(solution_space, freq_precision):
@@ -443,9 +471,9 @@ def define_useful_kde_peaks(frequencies, kde_reshape, complexity, freq_precision
     if complexity == "high":
         total_peaks = 20
     elif complexity == "low":
-        total_peaks = 15
+        total_peaks = 20
     else:
-        total_peaks = 10
+        total_peaks = 20
     n_components = [50, 45, 40, 35, 30, 25, 20, 15, 10, 5]
     n = len(kde_reshape)    
     alot_peaks = []
@@ -459,10 +487,10 @@ def define_useful_kde_peaks(frequencies, kde_reshape, complexity, freq_precision
             if r[0] <= peak*100 < r[1]:
                 count +=1
         percent = count/n
-        alot_peaks.append(percent)       
+        alot_peaks.append(percent)        
         kp = round(total_peaks * percent)
         keep_peaks.append(kp)
-        #print(r, round(percent,2), count, kp)
+        #print(r, round(percent,2), count, kp, percent)
     for r, kp in zip(ranges, keep_peaks):
         if kp == 0:
             continue
@@ -486,9 +514,10 @@ def define_useful_kde_peaks(frequencies, kde_reshape, complexity, freq_precision
                 break
             prev = copy.deepcopy(small_peaks)
         pf = [round(x,3) for x in small_peaks]
-        pf.sort()   
+        pf.sort()  
+ 
     all_peaks = [round(x, freq_precision) for x in all_peaks]
-    all_peaks = [x for x in list(np.unique(all_peaks)) if x > 0]
+    #all_peaks = [x for x in list(np.unique(all_peaks)) if x > 0]
     all_peaks.sort()
     return(all_peaks)
                
@@ -508,38 +537,6 @@ def create_complexity_estimate(total_mut_pos, ambiguity_dict):
         complexity = "high"
     return(complexity)
 
-def train_single_model(final_points, solution, training_data, default_sigma):
-    final_points_expand = np.expand_dims(final_points, axis=1)
-    gxx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand, solution=solution, default_sigma=default_sigma, fixed_means=True)
-    gxx.init_em(training_data)
-    
-    max_num_iters = 100
-    useful_iterations = 100
-    log_likelihood = []
-    for e in range(max_num_iters):
-        gxx.iteration += 1
-        gxx.e_step()
-        gxx.m_step()
-        if len(gxx.sigma_reset) > 0:
-            useful_iterations = e
-            break
-    if max_num_iters != useful_iterations:
-        gxx = GMM(k=len(final_points), dim=1, init_mu = final_points_expand, solution=solution, default_sigma=default_sigma, fixed_means=True)
-        gxx.init_em(training_data)
-        log_likelihood = []
-        for e in range(useful_iterations):
-            gxx.iteration += 1
-            gxx.e_step()
-            gxx.m_step() 
-    assignment, score, all_scores, ll = gxx.score(training_data)
-    sll = [np.log(x) for x in score]
-
-    new_means = list(np.squeeze(gxx.mu))
-    new_means.sort(reverse=True)    
-    final_points.sort(reverse=True)
-    print("new score", sum(sll))
-    return(gxx)
-
 def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyja_file=None):
     freq_lower_bound = 0.0001
     freq_upper_bound = 0.98
@@ -549,24 +546,24 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     percent_solution_space = 0.01
     lower_subtract = 0.30
     default_sigma = 1
+    r_min = 3
+    r_max = 14
+    solutions_to_train = 3000
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
-    r_values_file = os.path.join(output_dir, output_name+"_solutions.txt") 
-
+    model_location = os.path.join(output_dir, output_name+"_model.pkl")
     problem_primers = None
     remove_pos_dict = None
     
     variants_json = os.path.join(output_dir, output_name+"_variants.txt")
-    
+     
     if os.path.isfile(variants_json):
         with open(variants_json, "r") as rfile:
             primer_dict = json.load(rfile)
             bam_file = None
-    
     if bam_file is not None:
         primer_dict = file_util.parse_bam_depth_per_position(bam_file, bed_file, variants_json)
         return(1)
-    else:
-        return(1)
+    
     freyja_file = None
     if freyja_file is not None:
         gt_centers, gt_lineages = file_util.parse_freyja_file(freyja_file)
@@ -576,11 +573,12 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     reference_sequence = file_util.parse_reference_sequence(reference_file)
     primer_positions = file_util.parse_bed_file(bed_file)
     frequency, nucs, positions, depth, low_depth_positions, reference_positions, ambiguity_dict, \
-        total_mutated_pos  = file_util.parse_variants(primer_dict, primer_positions, reference_sequence)
-    """ 
-    zipped = list(zip(frequency, nucs, positions, depth))
+        total_mutated_pos, training_removed, joint_peak, joint_nuc, joint_dict  = file_util.parse_variants(primer_dict, primer_positions, reference_sequence)
+    
+    """
+    zipped = list(zip(positions, frequency, nucs, depth))
     zipped.sort()
-    frequency, nucs, positions, depth = zip(*zipped) 
+    positions, frequency, nucs, depth = zip(*zipped) 
     print(len(frequency)) 
     for f,n,p,d in zip(frequency, nucs, positions, depth):
         r_check = str(n) + "_" + str(p)
@@ -590,65 +588,70 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
             var = str(p) + str(n)
             print(round(f,3), n, p)
     sys.exit(0)
-    """
+    """ 
+    joint_peak = [round(x, freq_precision) for x in joint_peak] 
+    jd = {}
+    for k,v in joint_dict.items():
+        jd[round(k,freq_precision)] = v
+    joint_dict = jd
+    print(joint_dict)
+    #sys.exit(0)
+    print("total mutated pos", len(total_mutated_pos))
     #here we filter out really low data points, and data points we assume to be "universal mutations"
     new_frequencies = [round(x, freq_precision) for x in frequency if x > freq_lower_bound and x < freq_upper_bound]
     
-
-    #first, we do a kernel density estimate to find local maxmima
-    kde_peaks = define_kde(new_frequencies)
-    kde_peaks.sort(reverse=True)
-
-    """
-    print("length of total mut pos", len(total_mutated_pos))
-    print("length ambiguity", len(ambiguity_dict.keys()))
-    tmp_dict = {"amb_length": len(ambiguity_dict), "mut_length":total_mutated_pos}
-    with open(text_file, "w") as bfile:
-        bfile.write(json.dumps(tmp_dict))
-        bfile.write("\n")    
-    return(0)
-    """
-    complexity = create_complexity_estimate(total_mutated_pos, ambiguity_dict)
-    r_min = 3
-    r_max = 14
-  
-    #if we have no data
-    if len(kde_peaks) == 0 or len(new_frequencies) == 0:
+    if len(new_frequencies) == 0:
         return(1)
- 
-    #second, we cluster the local maxmima into a useable solution set, and estimate the complexity
-    kde_reshape = np.array(kde_peaks).reshape(-1,1)
-    refined_kde_peaks = define_useful_kde_peaks(new_frequencies, kde_reshape, complexity)
+
+    complexity = create_complexity_estimate(total_mutated_pos, ambiguity_dict)
+    if complexity != "extremely low":
+        return(1)
+    
+    #lets look at the removed points and the new_frequencies
+    kde_data = []
+    arr = np.array(joint_peak)
+    for f in new_frequencies:
+        diff = np.abs(arr-f)
+        thresh = f * 0.05
+        diff = [x for x in diff if x < thresh]
+        if len(diff) == 0:
+            kde_data.append(f)
+        
+    num = 3000
+    refined_kde_peaks = define_kde(kde_data, complexity, num)
+    refined_kde_peaks.sort(reverse=True)
+    #if we have no data
+    if len(refined_kde_peaks) == 0 or len(new_frequencies) == 0:
+        return(1)
 
     tmp = sum([x for x in refined_kde_peaks if x < 0.01])
     refined_kde_peaks = [x for x in refined_kde_peaks if x >= 0.01]
     refined_kde_peaks.append(tmp)
     refined_kde_peaks.sort()
-    print(refined_kde_peaks, len(refined_kde_peaks))
     print("complexity", complexity)
-    if complexity == "high":
-        r_min = 5
-        #return(1)
-    elif complexity == "low" or complexity == "extremely low":
-        r_max = 5
-    elif complexity == "extremely high":
-        r_min = 9
+
+    #this may be expanded in future iterations for more complex samples
+    if complexity == "low" or complexity == "extremely low":
+        r_max = 7
+        error = 0.05
+    else:
         return(1)
-    error = 0.03
+
     refined_kde_peaks = [round(x, freq_precision) for x in refined_kde_peaks if x > 0]
     print("refined kde", refined_kde_peaks, len(refined_kde_peaks))
+    print("joint peak", joint_peak)
 
     #create the dataset that we're going to actually use for training, filtering out more low level point
     training_data = np.array([x for x in new_frequencies if x > training_lower_bound])
     if len(refined_kde_peaks) < r_max:
         r_max = len(refined_kde_peaks)
-
     r_clusters = list(np.arange(r_min, r_max))
     #define an expansive solution space from r_min, r_max where E(solution) > 0.65
     solution_space = []    
     for r in r_clusters:
         r_solution = create_solution_space(refined_kde_peaks, r, lower_subtract=lower_subtract)
         solution_space.extend(r_solution)
+
     print("original solution space length", len(solution_space))
     #here we assume that their might be exactly 1 totally hidden solution that accounts for the difference
     solution_space = find_masked_solution(solution_space, freq_precision)
@@ -660,47 +663,22 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     print("length of expansive solution space", len(solution_space))
     #constraint #2 all means from original GMM must be accounted for
     if complexity != "low" and complexity != "extremely low":
-        solution_space = parallel_eliminate_solutions(solution_space, refined_kde_peaks)
-    solutions_to_train = 500   
-    """ 
-    if complexity == "low" or complexity == "lowest":
-        solutions_to_train = 500
-        keep = []
-        for solution in solution_space:
-            if len(solution) <= r_max and solution not in keep:
-                keep.append(solution)
-        solution_space = keep
-    else:
-        solutions_to_train = 100
-    r_values = range(r_min, r_max)  
-    """
-    print("length of solution space accounting for individual/shared peak presence", len(solution_space))
-    if len(solution_space) > 0:
-        #here we determine a tighter rmin, rmax based on the number of solutions at each r value
-        r_values = determine_r_values(solution_space, r_clusters)        
-        print("looking for solutions of ", r_values, "lengths...")
-        keep_solutions = []
-        for sol in solution_space:
-            if len(sol) in r_values:
-                keep_solutions.append(sol)
-        print("total of %s solutions..." %(len(keep_solutions))) 
-        solution_space = keep_solutions
-    if len(solution_space) == 0:
-        return(1)
+        solution_space = parallel_eliminate_solutions(solution_space, refined_kde_peaks) 
+
     if len(solution_space) > solutions_to_train:
         solution_space = collapse_solution_space(solution_space, freq_precision, clusters=solutions_to_train) 
         print("length of collapsed solution space", len(solution_space))
-
+    
     #prior to acutal training, collapse down tiny peaks to make training more reasonable
     solution_space = collapse_small_peaks(solution_space, freq_precision, collapse_value = 0.05)
     training_data = [round(x, freq_precision) for x in training_data]
-   
     #deduplicate the solution space
     keep = []
     for sol in solution_space:
         if sol not in keep and len(sol) > 2:
             keep.append(sol)
     solution_space = keep
+
     print("sol length after deduplication", len(solution_space))    
     total = 0
     points = 0
@@ -712,7 +690,6 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
         return(1)
     r_average = total/points
     print("average r", r_average)
-    r_values = [int(x) for x in r_values]
     new_solution_space = solution_space
 
     if DEBUG:    
@@ -723,12 +700,10 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     all_models = []
     all_model_log_likelihood = []
     all_final_points = []    
-    all_conflict_dicts = []    
     maximum_likelihood_points = []
     all_saved_solutions = []
     print("solution space contains %s solutions..." %len(new_solution_space))
     print("training models...")
- 
     #filter out variants that aren't being used in training, look for universal mutations 
     training_data = np.expand_dims(training_data, axis=1)
     new_positions = [y for x,y in zip(frequency, positions) if float(x) > training_lower_bound and x < freq_upper_bound]
@@ -736,70 +711,62 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     original_variants = [str(x)+y for x,y in zip(new_positions, new_nucs)]
 
     #train the models
-    all_saved_solutions, all_final_points, all_models, all_conflict_dicts, \
-        maximum_likelihood_points, scores, assignments, all_scores, mean_diff \
-        = parallel_train_models(new_solution_space, training_data, freq_precision, default_sigma)
+    all_saved_solutions, all_final_points, all_models, \
+        maximum_likelihood_points, scores, assignments, all_scores, all_aic  \
+        = parallel_train_models(new_solution_space, training_data, freq_precision, default_sigma, new_positions)
 
     #get the best model
-    sorted_scores = copy.deepcopy(maximum_likelihood_points)
+    sorted_scores = copy.deepcopy(all_aic)
     original_index = list(range(0, len(maximum_likelihood_points)))
     zipped = list(zip(sorted_scores, original_index))
-    zipped.sort(reverse=True)
+    zipped.sort()
     sorted_scores, original_index = zip(*zipped)    
-    
-    """ 
-    half_space = int(len(sorted_scores)/2)
-    sorted_scores = sorted_scores[:half_space]
-    original_index = original_index[:half_space]
-    """
-
-    for i, (loc, ll) in enumerate(zip(original_index, sorted_scores)):
+    best_score = 1000
+    flat_training = list(np.squeeze(training_data))
+    for i, (loc, aic) in enumerate(zip(original_index, sorted_scores)):
+        #if i > 100:
+        #    break
         mm = all_models[loc]
         a = assignments[loc]
         s = scores[loc]
         als = all_scores[loc]
-        for td, aa, sc, alls in zip(training_data, a, s, als):
-            diff = round(abs(td[0]-aa[0]),3)
-        print("\n", i, "score", ll, all_saved_solutions[loc], len(all_saved_solutions[loc]))
-        print("mean diff", mean_diff[loc])
-        new_means = list(np.squeeze(mm.mu))
-        print(new_means)
-    #sys.exit(0) 
-    loc_best_model = maximum_likelihood_points.index(sorted_scores[0])
-    loc_best_model = mean_diff.index(min(mean_diff))
+        n = [round(x,3) for x in list(np.squeeze(mm.mu))]
+        n.sort()
+        print(i, "score", sum(s), "aic", aic, all_saved_solutions[loc], len(all_saved_solutions[loc]))
+        combination_solutions, combination_sums = generate_combinations(len(all_saved_solutions), all_saved_solutions[loc])
+        combination_sums = [round(x,3) for x in combination_sums]
+        useful_solution = True
+        for aa, ss, td, all_sc in zip(a, s, training_data, als):
+            td = td[0]
+            if td in joint_peak:
+                idx = combination_sums.index(aa[0])
+                print("assignment", aa, "score", ss, "data", td, combination_solutions[idx])
+                constituents = [round(x, freq_precision) for x in joint_dict[td][0]]
+                for c in constituents:
+                    idxx = flat_training.index(c)
+                    ca = a[idxx][0]
+                    idxx = combination_sums.index(ca)
+                    must_have = combination_solutions[idxx]
+                    print(c, "must have", must_have)
+                    overlap = [x for x in must_have if x not in combination_solutions[idx]]
+                    
+                    if len(overlap) > 0:
+                        useful_solution = False
+        if useful_solution is True and aic < best_score:
+            print("HERE")
+            best_score = aic
+    loc_best_model = all_aic.index(best_score)
     gx = all_models[loc_best_model]
-
-    initial_means = list(np.squeeze(gx.init_mu))
-    initial_means.sort()
-    final_means = list(np.squeeze(gx.mu))
-    final_means.sort()
-
-    diff = [abs(x-y) for x,y in zip(initial_means, final_means)]
-    keep_initial_means = [x for x,y in zip(initial_means, diff) if y < 0.05]
-    print("solution", all_saved_solutions[loc_best_model])
-    print("initial means", initial_means)
-    print("final means", final_means)
-    print("diff", diff)  
-
-    gx = train_single_model(keep_initial_means, all_saved_solutions[loc], training_data, default_sigma)
-
-    #sys.exit(0)
     solution = all_saved_solutions[loc_best_model]
     final_points = all_final_points[loc_best_model]
-
     #create a new dataset for actually assigning out variants
     new_frequency, new_nucs, new_positions, add_low_depth_positions, universal_mutations = file_util.parse_additional_var(primer_dict, primer_positions, reference_sequence, ambiguity_dict, training_lower_bound, freq_upper_bound)
     new_variants = [str(p) + str(n) for p,n in zip(new_positions, new_nucs)] 
     assignment_data = np.array(new_frequency).reshape(-1,1)    
- 
-    #TESTLINES
-    print([x for x in new_variants if x not in original_variants])
-    #sys.exit(0)
-    
-    conflict_dict = all_conflict_dicts[loc_best_model]
+       
     print("scoring new data points")
-    assignments, scores, all_likelihoods, ll  = gx.score(assignment_data)
- 
+    assignments, scores, all_likelihoods, ll  = gx.other_score(assignment_data, new_positions)
+    
     combination_solutions, combination_sums = generate_combinations(len(solution), solution)
     combination_sums = [round(x,freq_precision) for x in combination_sums]
     print("best solution", solution)
@@ -812,63 +779,8 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     save_assignments = []
     save_freq = []
     save_combos = []
-    num_points = [0.0] * len(solution)
 
-    single_assignment = {}
-    for s in solution:
-        single_assignment[s] = []
-    for i, (point, assignment, score, all_score) in enumerate(zip(assignment_data, assignments, scores, all_likelihoods)):     
-        assignment = assignment[0]
-        point = point[0]
-        nuc = str(new_nucs[i])
-        pos = str(new_positions[i])
-        variant = pos+nuc
-        if str(nuc) + "_"+ str(pos) in reference_positions:
-            continue
-        location = combination_sums.index(assignment)
-        position = variant[:-1]
-        print("\n", variant, "score", score, "assign", assignment, "point", point, "combo", combination_solutions[location])              
-        dist = abs(point-assignment)
-        idx = np.abs(gx.mu - point).argmin()
-        print("distance from assignment", dist)
-        for al, m in zip(all_score, gx.mu):
-            print(al, m) 
-        if dist > 0.10 * point:
-            print("first condition met")
-            print(dist, point*0.50)            
-            if gx.mu[idx] != assignment: 
-                #find the cluster that's linearly closest to the point
-                new_assignment = float(gx.mu[idx])
-                other = combination_sums.index(new_assignment)
-                print("linear dist point", gx.mu[idx], combination_solutions[other])
-                #find the cluster that's second most likely
-                second_highest = max([x for x in all_score if x != max(all_score)])
-                other_idx = all_score.index(second_highest)
-                other_new_assignment = float(gx.mu[other_idx])
-                other_loc = combination_sums.index(other_new_assignment)
-                print("second most likely", other_new_assignment, combination_solutions[other_loc])
-                if other_new_assignment == new_assignment:
-                    assignment = new_assignment
-                    score = float(all_score[idx])
-                    location = combination_sums.index(assignment)
-                    print(assignment, score)  
-        save_variants.append(variant)
-        save_scores.append(score)
-        save_assignments.append(assignment)
-        save_freq.append(point)
-        save_combos.append(combination_solutions[location])
-        #if score < 0.001:
-        #    add_low_depth_positions.append(int(position))
-        #    continue           
-        if len(combination_solutions[location]) == 1:
-            single_assignment[assignment].append(point)
-        for individual in combination_solutions[location]:
-            idx = solution.index(individual)
-            num_points[idx] += 1
-            tmp_list = copy.deepcopy(autoencoder_dict[individual])
-            tmp_list.append(variant)
-            autoencoder_dict[individual] = tmp_list
-
+    removal_dict, autoencoder_dict, no_call = determine_consensus_call(assignment_data, assignments, scores, all_likelihoods, autoencoder_dict, new_nucs, new_positions, combination_sums, combination_solutions, reference_positions)
     if DEBUG: 
         counter = 0
         check.sort()
@@ -892,9 +804,11 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
                 check3_fail = [item for item in check3 if item not in value and item[:-1] not in low_depth_positions]
                 print("\n", key, check3_fail)
                 print("extra", [item for item in value if item not in check3 and "-" not in item and item[:-1] not in low_depth_positions])
-            counter += 1   
-         
-    tmp_dict = {"autoencoder_dict":autoencoder_dict,"low_depth_positions":add_low_depth_positions, "variants":save_variants, "scores":save_scores, "assignments": save_assignments, "conflict_dict": conflict_dict, "r_values":r_values, "ambiguity_dict":ambiguity_dict, "all_trained_solutions": new_solution_space, "assignment_data":new_frequency}
+            counter += 1  
+
+    pickle.dump(gx, open(model_location, 'wb')) 
+    tmp_dict = {"autoencoder_dict":autoencoder_dict,"low_depth_positions":add_low_depth_positions, "ambiguity_dict":ambiguity_dict, "all_trained_solutions": new_solution_space, "assignment_data":new_frequency, "no_call":no_call, "removal_dict":removal_dict, "aic": best_score}
+
     with open(text_file, "w") as bfile:
         bfile.write(json.dumps(tmp_dict))
         bfile.write("\n")    
