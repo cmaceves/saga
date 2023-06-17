@@ -4,9 +4,16 @@ Script to analyze the wastewater data taken from point loma during the delta -> 
 import os
 import sys
 import json
+import numpy as np
+from joblib import Parallel, delayed
 sys.path.insert(0, "../")
-from model import run_model
+from model import run_model, call_consensus
 from generate_consensus import write_fasta
+
+
+def train_parallel(sample_ids, directory_bam, directory_variants, reference_file, bed_file):
+    code = Parallel(n_jobs=10)(delayed(train)(sample_id, directory_bam, directory_variants, \
+        reference_file, bed_file) for sample_id in sample_ids)
 
 def main():
     directory_bam = "/home/chrissy/Desktop/spike_in"
@@ -16,7 +23,12 @@ def main():
 
     sample_ids = os.listdir(directory_bam)           
     all_files = [os.path.join(directory_bam, x) for x in sample_ids if x.endswith(".bam")]
-    train("file_148", directory_bam, directory_variants, reference_file, bed_file)
+    sample_ids = [x.split("_sorted")[0] for x in sample_ids if x.endswith(".bam")]
+    sample_ids = list(np.unique(sample_ids))
+    
+    train_parallel(sample_ids, directory_bam, directory_variants, reference_file, bed_file)
+    #145, 122, 340, 377, 300
+    #train("file_145", directory_bam, directory_variants, reference_file, bed_file)
 
 def train(sample_id, directory_bam, directory_variants, reference_file, bed_file):
     tmp = sample_id.split("_")[:2]
@@ -28,28 +40,32 @@ def train(sample_id, directory_bam, directory_variants, reference_file, bed_file
     bam_file = directory_bam + "/%s_sorted.calmd.bam" %sample_id
     if not os.path.isdir(output_dir):
         os.system("mkdir %s" %output_dir)
-
-    #output_dir, output_name, bam_file, bed_file, reference_file, freyja_file=None
-    exit_code = run_model(
-        output_dir, \
-        output_name, \
-        bam_file, \
-        bed_file, \
-        reference_file)
-
+    
+    exit_code = run_model(output_dir, output_name, bam_file, bed_file, reference_file)
     if exit_code == 1:
         return(1)
+    #sys.exit(0)    
+    
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
+    
+    model_location = os.path.join(output_dir, output_name+"_model.pkl")
+    call_consensus(output_dir, output_name, model_location, reference_file, bed_file)
     with open(text_file, "r") as tfile:
         for i, line in enumerate(tfile):
             line = line.strip()
             model_dictionary = json.loads(line)
             model_dict = model_dictionary['autoencoder_dict']
-            problem_positions = model_dictionary['problem_positions']
-            if problem_positions is not None:
-                problem_positions.extend(model_dictionary['low_depth_positions'])
-            else:
-                problem_positions = model_dictionary['low_depth_positions']
+            no_call = [str(x) for x in model_dictionary['no_call']]
+            print("no call", no_call)
+            tmp_dict = {}
+            for k,v in model_dict.items():
+                if k not in no_call:
+                    tmp_dict[k] = v
+            model_dict = tmp_dict
+            problem_positions = []
+            problem_positions.extend(model_dictionary['call_ambiguity'])
+            problem_positions.extend(model_dictionary['low_depth_positions'])
+
     write_fasta(model_dict, output_fasta_name, reference_file, problem_positions)
     return(0)
 

@@ -6,6 +6,7 @@ from scipy import random
 import matplotlib.transforms as transforms
 from scipy.stats import multivariate_normal
 np.seterr(all="ignore")
+
 class GMM():
     def __init__(self, k, dim, init_mu=None, init_sigma=None, init_pi=None, name=None, solution=None, default_sigma=None, fixed_means=False):
         '''
@@ -24,7 +25,7 @@ class GMM():
         self.init_mu = init_mu
         self.iteration = 0
         if default_sigma is None:
-            self.default_sigma = 0.1
+            self.default_sigma = 1
         else:
             self.default_sigma = default_sigma
         self.k = k
@@ -45,6 +46,7 @@ class GMM():
         if name is not None:
             self.name = name   
         self.sigma_reset = {}
+        self.aic = 1000
 
     def init_em(self, X, positions, combination_solutions, combination_sums):
         '''
@@ -110,7 +112,7 @@ class GMM():
                 combo_check = [self.mu_combo[i] for i in index]
                 for c, i, cc in zip(check, index, combo_check):
                     if len([x for x in cc if x in no_overlap_combo]) > 0:
-                        self.z[pos, i] = 0                       
+                        self.z[pos, i] = 0
                     else:
                         break    
         self.z /= self.z.sum(axis=1, keepdims=True)
@@ -181,7 +183,7 @@ class GMM():
         for p in position_conflicts:
             idxs = [i for i,x in enumerate(positions) if x == p]
             position_conflict_idx.append(idxs)
-
+        
         z = np.zeros((len(X), self.k))
         for i in range(self.k):
             if self.sigma[i][0][0] == 0 or str(self.sigma[i][0][0]) == 'nan':
@@ -197,6 +199,7 @@ class GMM():
         #assignment is max of z in k direction
         max_idxs = np.argmax(z, axis=1)
         max_vals = np.amax(z, axis=1)
+        
         for pc in position_conflict_idx:
             pcids = [max_idxs[i] for i in pc] #get assignments for position conflicts
             pcvals = [max_vals[i] for i in pc] #get assignments for position conflicts
@@ -208,9 +211,6 @@ class GMM():
             for pos in pc:
                 if pos == pc_top:
                     continue
-                if pos == 5165:
-                    print(pcids)
-                    print(pcvals)
                 check = z[pos, :]
                 index = list(range(0,len(check)))
                 zipped = list(zip(check, index))
@@ -226,7 +226,7 @@ class GMM():
         assignments = []
         scores = []
         ll = []
-       
+        all_diff  = 0 
         for i in range(len(z)):
             tmp = []
             tot = 0
@@ -235,9 +235,14 @@ class GMM():
             like = z[i,:]
             tot += sum(like)
             ll.append(np.log(tot))
-            all_like.append(like)
-            scores.append(max(like))
             idx = list(like).index(max(like))
+            diff = abs(X[i]-self.mu[idx])
+            all_diff += diff[0]
+            #print(self.data[i], self.mu[idx], max(like), self.solution, diff) 
             assignments.append(self.mu[idx])
-        return(assignments, scores, all_like, ll)
+            scores.append(max(like))
+            all_like.append(like)
+        sll = [np.log(x) if x > 0 else 0 for x in scores]
+        self.aic = (1 * len(self.mu)) - (4 * sum(sll))
+        return(assignments, scores, all_like, ll, self.aic, all_diff)
 
