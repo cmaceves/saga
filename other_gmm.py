@@ -1,6 +1,7 @@
 import os
 import sys
 import copy
+import itertools
 import numpy as np
 from scipy import random
 import matplotlib.transforms as transforms
@@ -63,6 +64,7 @@ class GMM():
             idx = combination_sums.index(m)
             self.mu_combo.append(combination_solutions[idx])
         self._positional_conflicts()
+        self.possible_assign_pairs()
 
     def _positional_conflicts(self):
         """
@@ -90,31 +92,6 @@ class GMM():
             x = [a if str(a) != 'nan' else 0 for a in x]
             self.z[:, i] = x
 
-        #assignment is max of z in k direction
-        max_idxs = np.argmax(self.z, axis=1)
-        max_vals = np.amax(self.z, axis=1)
-        for pc in self.position_conflict_idx:
-            pcids = [max_idxs[i] for i in pc] #get assignments for position conflicts
-            pcvals = [max_vals[i] for i in pc] #get assignments for position conflicts
-            max_pcval = max(pcvals)
-            max_pc_idx = pcvals.index(max_pcval)
-            combos = [self.mu_combo[i] for i in pcids]
-            no_overlap_combo = combos[max_pc_idx]
-            pc_top = pc[max_pc_idx]
-            for pos in pc:
-                if pos == pc_top:
-                    continue
-                check = self.z[pos, :]
-                index = list(range(0,len(check)))
-                zipped = list(zip(check, index))
-                zipped.sort(reverse=True)
-                check, index = zip(*zipped)
-                combo_check = [self.mu_combo[i] for i in index]
-                for c, i, cc in zip(check, index, combo_check):
-                    if len([x for x in cc if x in no_overlap_combo]) > 0:
-                        self.z[pos, i] = 0
-                    else:
-                        break    
         self.z /= self.z.sum(axis=1, keepdims=True)
     
     def m_step(self):
@@ -176,6 +153,53 @@ class GMM():
             assignments.append(self.mu[idx])
         return(assignments, scores, all_like, ll)
 
+    def possible_assign_pairs(self):
+        means = np.squeeze(self.mu)
+        combos = self.mu_combo
+        possible_assign_pairs = []
+        two_combos = list(itertools.permutations(combos, 2))
+        for combination in two_combos:
+            a = combination[0]
+            b = combination[1]
+            overlap = set(a) & set(b)
+            if len(overlap) == 0:
+                idx_a = combos.index(a)
+                idx_b = combos.index(b)
+                pair = [idx_a, idx_b] 
+                possible_assign_pairs.append(pair)                          
+        three_combos = list(itertools.permutations(combos, 3))
+        for combination in three_combos:
+            if len(combination) != 3:
+                continue
+            a = set(combination[0])
+            b = set(combination[1])
+            c = set(combination[2])
+            overlap = set.intersection(a,b,c)
+            if len(overlap) == 0:
+                idx_a = combos.index(combination[0])
+                idx_b = combos.index(combination[1])
+                idx_c = combos.index(combination[2])
+                pair = [idx_a, idx_b, idx_c] 
+                possible_assign_pairs.append(pair)                          
+        four_combos = list(itertools.combinations(combos, 4))
+        for combination in four_combos:
+            if len(combination) != 4:
+                continue
+            a = set(combination[0])
+            b = set(combination[1])
+            c = set(combination[2])
+            d = set(combination[3])
+            overlap = set.intersection(a,b,c,d)
+            if len(overlap) == 0:
+                idx_a = combos.index(combination[0])
+                idx_b = combos.index(combination[1])
+                idx_c = combos.index(combination[2])
+                idx_d = combos.index(combination[3])
+                pair = [idx_a, idx_b, idx_c, idx_d] 
+                possible_assign_pairs.append(pair)                          
+       
+        self.possible_assign_pairs = possible_assign_pairs
+
     def other_score(self, X, positions):
         unique, counts = np.unique(positions, return_counts=True)
         position_conflicts = [x for x,y in zip(list(unique), list(counts)) if y > 1]
@@ -183,7 +207,7 @@ class GMM():
         for p in position_conflicts:
             idxs = [i for i,x in enumerate(positions) if x == p]
             position_conflict_idx.append(idxs)
-        
+       
         z = np.zeros((len(X), self.k))
         for i in range(self.k):
             if self.sigma[i][0][0] == 0 or str(self.sigma[i][0][0]) == 'nan':
@@ -199,29 +223,52 @@ class GMM():
         #assignment is max of z in k direction
         max_idxs = np.argmax(z, axis=1)
         max_vals = np.amax(z, axis=1)
-        
+        sorted_args = np.argsort(z, axis=1)
         for pc in position_conflict_idx:
-            pcids = [max_idxs[i] for i in pc] #get assignments for position conflicts
-            pcvals = [max_vals[i] for i in pc] #get assignments for position conflicts
-            max_pcval = max(pcvals)
-            max_pc_idx = pcvals.index(max_pcval)
-            combos = [self.mu_combo[i] for i in pcids]
-            no_overlap_combo = combos[max_pc_idx]
-            pc_top = pc[max_pc_idx]
-            for pos in pc:
-                if pos == pc_top:
+            length = len(pc)
+            ml_combos = []
+            for pair in self.possible_assign_pairs:
+                if len(pair) != length:
                     continue
-                check = z[pos, :]
-                index = list(range(0,len(check)))
-                zipped = list(zip(check, index))
-                zipped.sort(reverse=True)
-                check, index = zip(*zipped)
-                combo_check = [self.mu_combo[i] for i in index]
-                for c, i, cc in zip(check, index, combo_check):
-                    if len([x for x in cc if x in no_overlap_combo]) > 0:
-                        z[pos, i] = 0                       
-                    else:
-                        break    
+                ml = 0
+                for a,b in zip(pc, pair):
+                    ml += z[a,b]
+                ml_combos.append(ml)
+            ml_idx = ml_combos.index(max(ml_combos))
+            best_assignment = self.possible_assign_pairs[ml_idx]
+            idx_1 = sorted_args[pc[0],:][::-1] 
+            idx_2 = sorted_args[pc[1], :][::-1]
+            if length == 3 or length == 4:
+                idx_3 = sorted_args[pc[2],:][::-1]
+                for v in idx_3:
+                    try:
+                        if v == best_assignment[2]:
+                            break
+                    except:
+                        print(best_assignment)
+                        print(pc)
+                        print(len(ml_combos))
+                        print(len(self.possible_assign_pairs))
+                        sys.exit(1)
+                    z[pc[2],v] = 0
+            if length == 4:
+                idx_4 = sorted_args[pc[3],:][::-1]
+                for v in idx_4:
+                    if v == best_assignment[3]:
+                        break
+                    z[pc[3],v] = 0
+                
+            for v in idx_1:
+                if v == best_assignment[0]:
+                    break
+                else:
+                    z[pc[0], v] = 0                
+
+            for v in idx_2:
+                if v == best_assignment[1]:
+                    break
+                else:
+                    z[pc[1],v] = 0
         all_like = []
         assignments = []
         scores = []
@@ -234,7 +281,10 @@ class GMM():
                 pass
             like = z[i,:]
             tot += sum(like)
-            ll.append(np.log(tot))
+            if tot > 0:
+                ll.append(np.log(tot))
+            else:
+                ll.append(0)
             idx = list(like).index(max(like))
             diff = abs(X[i]-self.mu[idx])
             all_diff += diff[0]

@@ -62,46 +62,67 @@ def closest_node(node, nodes):
     return(nodes[closest_index], closest_index)
 
 
-def closest_nodes(node, nodes, num_nodes=10):
-    distances = distance.cdist([node], nodes)[0]
-    indexes = list(range(len(distances)))
-    zipped = list(zip(distances, indexes))
-    zipped.sort()
-    distances, indexes = zip(*zipped)
-    distances = list(distances)
-    indexes = list(indexes)[:num_nodes]
-    selected_nodes = [x for i,x in enumerate(nodes) if i in indexes]
-    return(selected_nodes, indexes)
+def find_positions_exclude(positions, scores, assignments, assignment_data, likelihood_ratio=3, threshold=0.10):
+    """
+    Returns
+    -------
+    outliers : list
+        The list of positions where we're going to call N's due to low likelihood and high linear distance.
 
-def determine_consensus_call(assignment_data, assignments, scores, all_likelihoods, autoencoder_dict, new_nucs, new_positions,combination_sums, combination_solutions, reference_positions):
+    Under the given model, find points to exclude from the final consensus.
+    """
+    max_pos_dict = {}
+    pos_count_dict = {}
+    linear_dist = {}    
+    largest_peak = max(list(np.squeeze(assignments)))
+    for pos, score, assignment, point in zip(positions, scores, assignments, assignment_data):
+        if assignment[0] == largest_peak:
+            continue
+        if pos not in max_pos_dict:
+            max_pos_dict[pos] = 0
+            pos_count_dict[pos] = 0
+            linear_dist[pos] = 0
+        max_pos_dict[pos] += score
+        pos_count_dict[pos] += 1
+        linear_dist[pos] += abs(assignment-point)
+   
+    new_max_pos = {}
+    for pos in positions:
+        if pos not in max_pos_dict:
+            continue
+        new_max_pos[pos] = max_pos_dict[pos] / pos_count_dict[pos]
+        linear_dist[pos] = linear_dist[pos] / pos_count_dict[pos]
+    
+    outliers = []
+    best_likelihood = max(list(new_max_pos.values()))
+    for k, v in new_max_pos.items():
+        lin_d = linear_dist[k]
+        if v/best_likelihood < (1/likelihood_ratio) and lin_d > threshold:
+            outliers.append(str(k))
+
+    return(outliers, new_max_pos)
+ 
+def determine_consensus_call(assignment_data, assignments, scores, all_likelihoods, autoencoder_dict, new_nucs, new_positions,combination_sums, combination_solutions, reference_positions, primer_positions, outliers):
     """
     Given a set of sequences, determine what we call consensus on.
     """
     removal_dict = {}
     for k,v in autoencoder_dict.items():
-        removal_dict[k] = []
-
-    call_ambiguity = []    
-
-    #look at what scores may be lower outliers
-    arr_scores = np.array(scores)
-    med = np.median(arr_scores)
-    abs_diff = np.abs(arr_scores-med)
-    med_abs_diff = np.median(abs_diff)
-    z_scores = 0.6745 * (arr_scores - med) / med_abs_diff
-
-    for i, (point, assignment, score, all_like, z) in enumerate(zip(assignment_data, assignments, scores, all_likelihoods, z_scores)):
+        removal_dict[k] = []     
+    for i, (point, assignment, score, all_like) in enumerate(zip(assignment_data, assignments, scores, all_likelihoods)):
         point = point[0]
         assignment = assignment[0]
         nuc = str(new_nucs[i])
-        pos = str(new_positions[i])
+        pos = str(new_positions[i])           
         variant = pos+nuc
+        
+        if pos in outliers:
+            print(i, 'point', point, 'variant', variant, 'assignment', assignment, 'score', score)
+            continue
+             
         if pos+"_"+nuc in reference_positions:
             continue
-        if z < -1.65: #this is the 0.05 percent cutoff in a normal distribution
-            print("not used", variant, z)
-            call_ambiguity.append(pos)
-            continue
+
         location = combination_sums.index(assignment)
         combo_sol = combination_solutions[location]      
         all_like = [round(x,3) for x in all_like]
@@ -112,16 +133,17 @@ def determine_consensus_call(assignment_data, assignments, scores, all_likelihoo
         #print('point', point, 'variant', variant, 'assignment', assignment, 'score', score, all_like[0], all_like[1], all_like[2], combo_sol_copy[0], "z", z)
        
         ratio = all_like[0] / all_like[1]
+        dont_assign = []
         #we cannot concretely assign this point
         if ratio < 5:
             diff_assignment = [x for x in combo_sol_copy[0] if x not in combo_sol_copy[1]] 
             #if we can say it definitly belongs to one population at least
             for difference in diff_assignment:            
                 removal_dict[difference].append(variant)   
-                #print('point', point, 'variant', variant, 'assignment', assignment, 'score', score, all_like[0], all_like[1], all_like[2], combo_sol_copy[0], combo_sol_copy[1], "z", z)
-            continue
-        
+                dont_assign.append(difference)
         for cs in combo_sol_copy[0]:
+            if cs in dont_assign:
+                continue
             if variant not in autoencoder_dict[cs]:
                 autoencoder_dict[cs].append(variant)
         
@@ -129,7 +151,7 @@ def determine_consensus_call(assignment_data, assignments, scores, all_likelihoo
     for k,v in removal_dict.items():
         if len(v) > 0:
             no_call.append(k)
-    return(removal_dict, autoencoder_dict, no_call, call_ambiguity)          
+    return(removal_dict, autoencoder_dict, no_call)          
             
 def generate_combinations(n, solution):
     combination_solutions = []
@@ -190,6 +212,9 @@ def collapse_solution_space(solution_space, expanded_solution_space, freq_precis
     print("collapsing solution space...")
     new_solution_space = []
     kept_solutions = []
+    if clusters > len(expanded_solution_space):
+        return(solution_space)    
+
     #let's now cluster the solutions to try and eliminate duplicates
     k_solutions = MiniBatchKMeans(n_clusters=clusters)
     k_solutions.fit(np.array(expanded_solution_space))
@@ -282,12 +307,11 @@ def parallel_train_models(solutions, training_data, freq_precision, positions):
     all_saved_solutions = [x[0] for x in code]
     all_final_points = [x[1] for x in code]
     all_models = [x[2] for x in code]
-    all_linear_distances = [x[3] for x in code]
-    scores = [x[4] for x in code]
-    assignments = [x[5] for x in code]
-    all_scores = [x[6] for x in code]
-    all_aic = [x[7] for x in code]
-    return(all_saved_solutions, all_final_points, all_models, all_linear_distances, scores, assignments, all_scores, all_aic)
+    scores = [x[3] for x in code]
+    assignments = [x[4] for x in code]
+    all_scores = [x[5] for x in code]
+    all_aic = [x[6] for x in code]
+    return(all_saved_solutions, all_final_points, all_models, scores, assignments, all_scores, all_aic)
 
 def train_models(solution, training_data, freq_precision, positions): 
     n = len(solution)
@@ -299,8 +323,6 @@ def train_models(solution, training_data, freq_precision, positions):
             pass
         elif len(combination_solutions[j]) == 1:
             pass
-        elif tp >= 1.0:
-            continue
         elif tp in final_points:
             continue
         final_points.append(round(tp, freq_precision))
@@ -330,7 +352,7 @@ def train_models(solution, training_data, freq_precision, positions):
     assignment, score, all_scores, ll, aic, linear_distance = gxx.other_score(training_data, positions)
     sll = [np.log(x) for x in score]
     final_points.sort(reverse=True)
-    return(solution, final_points, gxx, linear_distance, score, assignment, all_scores, aic)
+    return(solution, final_points, gxx, score, assignment, all_scores, aic)
 
 def collapse_small_peaks(solution_space, freq_precision, r_max, collapse_value=0.03):
     """
@@ -470,29 +492,21 @@ def create_complexity_estimate(total_mut_pos, ambiguity_dict):
 
 def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyja_file=None):
     freq_lower_bound = 0.0001
-    freq_upper_bound = 0.97
+    freq_upper_bound = 0.99
     training_lower_bound = 0.03
     lower_subtract = 0.30
-    solutions_to_train = 1000
+    solutions_to_train = 3000
     model_location = os.path.join(output_dir, output_name+"_model.pkl")
     problem_primers = None
     remove_pos_dict = None
 
     variants_json = os.path.join(output_dir, output_name+"_variants.txt")
-    
     if os.path.isfile(variants_json):
         with open(variants_json, "r") as rfile:
             primer_dict = json.load(rfile)
             bam_file = None
-    
+
     if bam_file is not None:
-        """
-        lp = LineProfiler()
-        lp_wrapper = lp(file_util.parse_bam_depth_per_position)
-        lp_wrapper(bam_file, bed_file, variants_json)
-        lp.print_stats()
-        sys.exit(0)
-        """
         primer_dict = file_util.parse_bam_depth_per_position(bam_file, bed_file, variants_json)
         return(1)
     
@@ -519,15 +533,13 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
         r_max = 4
         error = 0.05
         freq_precision = 2
-        total_return_length = 30
+        total_return_length = 16
     else:
         return(1)
- 
     joint_peak, joint_nuc, joint_dict = file_util.parse_physcial_linkage(frequency, nucs, positions, depth, primer_dict, r_max)
 
     print("removed from the training set", training_removed)
-
-    """ 
+    """
     zipped = list(zip(frequency, positions, nucs, depth))
     zipped.sort()
     frequency, positions, nucs, depth = zip(*zipped) 
@@ -539,7 +551,7 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
             var = str(p) + str(n)
             print(round(f,3), n, p)
     sys.exit(0)
-    """ 
+    """  
     joint_peak = [round(x, freq_precision) for x in joint_peak] 
     jd = {}
     for k,v in joint_dict.items():
@@ -652,7 +664,7 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
 
     #train the models
     all_saved_solutions, all_final_points, all_models, \
-        all_linear_distances, all_scores, assignments, all_likelihoods, all_aic  \
+        all_scores, assignments, all_likelihoods, all_aic  \
         = parallel_train_models(new_solution_space, training_data, freq_precision, training_positions)
 
     #get the best model
@@ -663,59 +675,44 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
     sorted_scores, original_index = zip(*zipped)    
     best_score = 3000
     flat_training = list(np.squeeze(training_data))
-
-    X = []
-    color = []
-    sol_order =[]
-   
+  
     for i, (loc, aic) in enumerate(zip(original_index, sorted_scores)):
         mm = all_models[loc]
         a = assignments[loc]
         als = all_likelihoods[loc]
-        linear_dist = all_linear_distances[loc]
         scores = all_scores[loc]
-        #look at what scores may be lower outliers
-        arr_scores = np.array(scores)
-        med = np.median(arr_scores)
-        abs_diff = np.abs(arr_scores-med)
-        med_abs_diff = np.median(abs_diff)
-        z_scores = 0.6745 * (arr_scores - med) / med_abs_diff
-        n = [round(x,3) for x in list(np.squeeze(mm.mu))]
-        n.sort()
-        color.append(aic)
-        X.append(list(np.squeeze(mm.mu)))
-        sol_order.append(all_saved_solutions[loc])
+        ambiguity, new_max_pos = find_positions_exclude(new_positions, scores, a, training_data)
         if i < 15:
-            print(i, "aic", aic, "linear", linear_dist, all_saved_solutions[loc], len(all_saved_solutions[loc]))
+            print(i, "aic", aic, all_saved_solutions[loc], len(all_saved_solutions[loc]))
         
         combination_solutions, combination_sums = generate_combinations(len(all_saved_solutions), all_saved_solutions[loc])
         combination_sums = [round(x,3) for x in combination_sums]
         useful_solution = True
-        for aa, td, all_sc, z in zip(a, training_data, als, z_scores):
-            td = td[0]
-            if td in joint_peak:
-                if z < -1.65:
+        if len(joint_peak) > 0:
+            for aa, td, all_sc, pos in zip(a, training_data, als, new_positions):
+                if str(pos) in ambiguity:
                     continue
-                idx = combination_sums.index(aa[0])
-                constituents = [round(x, freq_precision) for x in joint_dict[td][0]]
-                for c in constituents:
-                    idxx = flat_training.index(c)
-                    ca = a[idxx][0]
-                    idxx = combination_sums.index(ca)
-                    must_have = combination_solutions[idxx]
-                    overlap = [x for x in must_have if x not in combination_solutions[idx]]
-                    
-                    if len(overlap) > 0:
-                        if i < 15:
-                            print("assignment", aa, "data", td, combination_solutions[idx])
-                            all_sc = list(all_sc)
-                            all_sc.sort(reverse=True)
-                            if all_sc[0] / all_sc[1] < 5:
-                                print("cont")
-                                continue
-                            #print(all_sc[0], all_sc[1], z)
-                            #print(c, "must have", must_have)
-                        useful_solution = False
+                td = td[0]
+                if td in joint_peak:
+                    idx = combination_sums.index(aa[0])
+                    constituents = [round(x, freq_precision) for x in joint_dict[td][0]]
+                    for c in constituents:
+                        idxx = flat_training.index(c)
+                        ca = a[idxx][0]
+                        idxx = combination_sums.index(ca)
+                        must_have = combination_solutions[idxx]
+                        overlap = [x for x in must_have if x not in combination_solutions[idx]]                    
+                        if len(overlap) > 0:
+                            if i < 15:
+                                print("assignment", aa, "data", td, combination_solutions[idx])
+                                all_sc = list(all_sc)
+                                all_sc.sort(reverse=True)
+                                if all_sc[0] / all_sc[1] < 5:
+                                    print("cont")
+                                    continue
+                                #print(all_sc[0], all_sc[1], z)
+                                #print(c, "must have", must_have)
+                            useful_solution = False
         if useful_solution is True and aic < best_score:
             print("used")
             best_score = aic
@@ -764,18 +761,22 @@ def call_consensus(output_dir, output_name, model_location, reference_file, bed_
     print("best solution", solution)
     autoencoder_dict = {}
     print("%s universal mutations found..." %len(universal_mutations))
+
+    call_ambiguity, new_max_pos = find_positions_exclude(new_positions, scores, assignments, assignment_data)
+
     for s in solution:
         autoencoder_dict[s] = copy.deepcopy(universal_mutations)
 
-    removal_dict, autoencoder_dict, no_call, call_ambiguity = determine_consensus_call(assignment_data, assignments, scores, all_likelihoods, autoencoder_dict, new_nucs, new_positions, combination_sums, combination_solutions, reference_positions)
+    removal_dict, autoencoder_dict, no_call = determine_consensus_call(assignment_data, assignments, scores, all_likelihoods, autoencoder_dict, new_nucs, new_positions, combination_sums, combination_solutions, reference_positions, primer_positions, call_ambiguity)
 
-    call_ambiguity = [int(x) for x in call_ambiguity]
-    call_ambiguity.sort()
     tmp_dict = {"autoencoder_dict":autoencoder_dict,"low_depth_positions":add_low_depth_positions, "ambiguity_dict":ambiguity_dict, "assignment_data":new_frequency, "no_call":no_call, "removal_dict":removal_dict, "complexity":complexity, "total_mutated_pos":total_mutated_pos, "call_ambiguity":call_ambiguity}
 
     with open(text_file, "w") as bfile:
         bfile.write(json.dumps(tmp_dict))
         bfile.write("\n")    
+
+    #write out the variants, including the likelihood
+    
     return(0)
 
 if __name__ == "__main__":

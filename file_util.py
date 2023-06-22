@@ -214,7 +214,6 @@ def parse_variants(bam_dict, primer_positions, reference_sequence, depth_cutoff=
                 if amplicon not in primer_binding_issue:
                     primer_binding_issue.append(amplicon)
                 break
-
     nucs = []
     frequencies = []
     positions = []
@@ -369,8 +368,8 @@ def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_0
         if DEBUG:
             if i % 100000 == 0:
                 print(i)
-            if i < 600000 or i > 800000:
-                continue   
+            #if i < 600000 or i > 900000:
+            #    continue   
         ref_pos = read.get_reference_positions()
         found = False
         if read.is_reverse: 
@@ -428,7 +427,7 @@ def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_0
                     clipped_positions = list(range(first_base - align_start, first_base))
                     soft_clipped_bases = query_seq[:align_start]
                     ref_sc = reference_sequence[first_base-align_start:first_base]
-                                        
+                                      
                     muts_linked = []
                     total_co_occurences.append(ref_pos)
                     if len(query_align_seq) == len(reference_sequence[ref_pos[0]:ref_pos[-1]+1]): 
@@ -453,7 +452,7 @@ def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_0
     value_flagged_dist = []
     variants = {}
     for key, value in enumerate(mut_dict):
-        #if key != 22281 and key != 22813 and key != 22206 and key != 25563:
+        #if key != 25784:
         #    continue 
         num_primers = []
         nuc_counts = {"A":0, "C":0, "G":0, "T":0, "N":0, "-":0}
@@ -474,8 +473,10 @@ def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_0
         for i in range(len(num_primers)):
             tracking_depth.append([0,0,0,0,0,0])
         for i, (nuc, primer) in enumerate(value.items()):
+            if total_depth == 0:
+                continue
             associated_reads = read_dict[key][nuc]
-            if len(associated_reads) < 50 or len(associated_reads)/total_depth < 0.03:
+            if len(associated_reads)/total_depth < 0.03:
                 continue            
             if DEBUG:
                 print("\n", key, nuc)
@@ -534,7 +535,7 @@ def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_0
     start_total_co = [x[0] for x in total_co_occurences]
     arr = np.array(start_total_co)
     for i, (ul, lc) in enumerate(zip(unique_link, link_counts)):
-        if len(ul) <= 1 or lc < 20:
+        if len(ul) <= 1 or lc < 10:
             continue
         tlc = 0
         ul_pos = [int(x[:-1]) for x in ul]
