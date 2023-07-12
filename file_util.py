@@ -11,8 +11,29 @@ from scipy import stats
 from line_profiler import LineProfiler
 DEBUG=False
 
+
+def check_primer_binding(ambiguity_dict, primer_positions):
+    """
+    Look for amplicons where (1) we have fluctuations in mutation frequency and (2) we have mutations in the primer binding region.
+    """
+    positions_amp_mut = []
+    for key, value in ambiguity_dict.items():
+        if "amplicon_flux" in value and "primer_mutation" in value:
+            positions_amp_mut.append(key)
+
+    flagged_pos = []
+    for pos in positions_amp_mut:
+        for primer in primer_positions:
+            tmp = list(range(primer[1], primer[2]+1))
+            if primer[1] < int(pos) < primer[2]:
+                flagged_pos.extend(tmp)
+
+    flagged_pos = list(np.unique(flagged_pos))
+    flagged_pos = [str(x) for x in flagged_pos]
+    return(flagged_pos)
+
 def parse_additional_var(bam_dict, primer_positions, reference_sequence, ambiguity_dict, \
-    lower_bound, upper_bound, depth_cutoff=50):
+    lower_bound, upper_bound, depth_cutoff=10):
     flagged_dist = bam_dict["flagged_dist"]
     value_flagged_dist = bam_dict['value_flagged_dist']
     variants = bam_dict["variants"]
@@ -73,7 +94,6 @@ def parse_additional_var(bam_dict, primer_positions, reference_sequence, ambigui
                 b = np.mean(np.unique(a))
             if b > 0.15:
                 call_ambiguity.append(int(position))
-    
     #make a list of primers we think are subject to amplicon flux
     amplicon_flux_amplicons = []
     """
@@ -145,39 +165,16 @@ def remove_depth(read, remove_pos_dict, reference_sequence, ref_pos, query_seq):
             remove_pos_dict[p+1][quer] += 1
     return(remove_pos_dict)
 
-def parse_variants(bam_dict, primer_positions, reference_sequence, depth_cutoff=50):
-    flagged_dist = bam_dict["flagged_dist"]
-    variants = bam_dict["variants"]
-    ambiguity_dict = {}
-    model_frequencies = []
+def get_primers_with_mutations(primer_positions, variants, depth_cutoff, primer_pos, reference_sequence):
     low_depth_positions = []
-    primer_binding_issue = []    
-    reference_variants = []
-    first_primer_index = [x[0] for x in primer_positions]
-    
-    test = {}
-
-    depth_cutoff = 50
-    flagged_dist_amp = []
-    for position in flagged_dist:
-        position = int(position)
-        for primer in primer_positions:
-            if primer[1] < position < primer[2]:
-                if primer not in flagged_dist_amp:
-                    flagged_dist_amp.append(primer)
-    primer_pos = []
-    for primer in primer_positions:
-        tmp = list(range(primer[0], primer[1]+1))
-        primer_pos.extend(tmp)
-        tmp = list(range(primer[2], primer[3]+1))
-        primer_pos.extend(tmp)
-    primer_pos = set(primer_pos)
-
-    #look for low depth
+    primer_binding_issue = []
     for position, value in variants.items():
         position = int(position)
         nuc_counts = value[1]
         total_depth = sum(list(nuc_counts.values()))
+        #if position == 26542:
+        #    print(position, total_depth)
+        #    sys.exit(0)
         if total_depth < depth_cutoff:
             low_depth_positions.append(position)
             continue
@@ -193,27 +190,46 @@ def parse_variants(bam_dict, primer_positions, reference_sequence, depth_cutoff=
         nuc_frequency = value[0]
         ref_nuc = reference_sequence[int(position)-1]
         for nuc, freq in nuc_frequency.items():
-            if nuc == ref_nuc:
+            if nuc == ref_nuc or freq <= 0.05:
                 continue
-            if freq > 0.05:
-                for primer in primer_positions:
-                    tmp = list(range(primer[0], primer[1]+1))
-                    if position in tmp:
-                        amplicon = [primer[1], primer[2]]
-                        break
-                    tmp = list(range(primer[2], primer[3]+1))
-                    if position in tmp:
-                        amplicon = [primer[1], primer[2]]
-                        break
-                tmp = list(range(amplicon[0], amplicon[1]))
-                for pos in tmp:
-                    if str(pos) not in test:
-                        test[str(pos)] = []
-                    test[str(pos)].append([freq, position, primer])
-                          
-                if amplicon not in primer_binding_issue:
-                    primer_binding_issue.append(amplicon)
-                break
+            for primer in primer_positions:
+                tmp = list(range(primer[0], primer[1]+1))
+                tmp.extend(list(range(primer[2], primer[3]+1)))
+                if position in tmp:
+                    amplicon = [primer[0], primer[3]]
+                    if amplicon not in primer_binding_issue:
+                        primer_binding_issue.append(amplicon)
+            break
+
+    return(primer_binding_issue, low_depth_positions)
+
+def parse_variants(bam_dict, primer_positions, reference_sequence, depth_cutoff=50):
+    flagged_dist = bam_dict["flagged_dist"]
+    variants = bam_dict["variants"]
+    value_flagged_dist = bam_dict["value_flagged_dist"]
+    ambiguity_dict = {}
+    model_frequencies = []
+    reference_variants = []
+    first_primer_index = [x[0] for x in primer_positions]
+   
+    test = {}
+    flagged_dist_amp = []
+    for position in flagged_dist:
+        position = int(position)
+        for primer in primer_positions:
+            if primer[1] < position < primer[2]:
+                if primer not in flagged_dist_amp:
+                    flagged_dist_amp.append(primer)
+    primer_pos = []
+    for primer in primer_positions:
+        tmp = list(range(primer[0], primer[1]+1))
+        primer_pos.extend(tmp)
+        tmp = list(range(primer[2], primer[3]+1))
+        primer_pos.extend(tmp)
+    primer_pos = set(primer_pos)
+
+    primer_binding_issue, low_depth_positions = get_primers_with_mutations(primer_positions, variants, depth_cutoff, primer_pos, reference_sequence)
+    #look for low depth
     nucs = []
     frequencies = []
     positions = []
@@ -227,20 +243,18 @@ def parse_variants(bam_dict, primer_positions, reference_sequence, depth_cutoff=
             if position not in ambiguity_dict:
                 ambiguity_dict[position] = []
             ambiguity_dict[position].append("low_depth")
-            
+             
         nuc_frequency = value[0]
         nuc_counts = value[1]
         ref_nuc = reference_sequence[int(position)-1]
-        primer_issue = False
         
         for primer in primer_binding_issue:
             if int(primer[0]) < int(position) < int(primer[1]): #and int(position) in single_primers:
-                primer_issue = True 
                 if position not in ambiguity_dict:
                     ambiguity_dict[position] = []
                 ambiguity_dict[position].append("primer_mutation")
                 break
-        
+         
         for primer in flagged_dist_amp:
             if int(primer[1]) < int(position) < int(primer[2]):
                 if position not in ambiguity_dict:
@@ -263,6 +277,7 @@ def parse_variants(bam_dict, primer_positions, reference_sequence, depth_cutoff=
                 continue
             if float(freq) > 0.0 and nuc != ref_nuc and nuc != "-":
                total_mutated_frequencies.append(float(freq))
+            
             if position in ambiguity_dict:
                 if nuc == ref_nuc:
                     reference_variants.append(str(position) + "_" + nuc)
@@ -273,6 +288,7 @@ def parse_variants(bam_dict, primer_positions, reference_sequence, depth_cutoff=
                         possible_train_freq_removed.append(float(freq))
                         possible_train_nuc_removed.append(nuc)
                 continue
+            
             if nuc == "-":
                 continue
             frequencies.append(float(freq))
@@ -341,7 +357,7 @@ def parse_physcial_linkage(frequencies, nucs, positions, depth, bam_dict, r_max,
                         joint_nuc.append(l)
     return(joint_peak, joint_nuc, joint_dict)
 
-def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_045512.2"):
+def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_045512.2", threshold=0.05):
     read_dict = []
     mut_dict = []
     phys_link_list = []    
@@ -368,8 +384,8 @@ def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_0
         if DEBUG:
             if i % 100000 == 0:
                 print(i)
-            #if i < 600000 or i > 900000:
-            #    continue   
+            if i < 1000000:
+                continue   
         ref_pos = read.get_reference_positions()
         found = False
         if read.is_reverse: 
@@ -408,7 +424,7 @@ def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_0
                             if quer != reference_sequence[p]:
                                 muts_linked.append(str(k)+str(quer))
                     if len(muts_linked) > 1:
-                        phys_link_list.append(muts_linked)
+                        phys_link_list.append("_".join(muts_linked))
 
         else:
             first_base = ref_pos[0]
@@ -445,14 +461,14 @@ def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_0
                                 muts_linked.append(str(k)+str(quer))
                            
                     if len(muts_linked) > 1:
-                        phys_link_list.append(muts_linked)
+                        phys_link_list.append("_".join(muts_linked))
                     
 
     flagged_dist = []
     value_flagged_dist = []
     variants = {}
     for key, value in enumerate(mut_dict):
-        #if key != 25784:
+        #if key != 23593 and key != 23606 and key != 28253 and key != 29834:
         #    continue 
         num_primers = []
         nuc_counts = {"A":0, "C":0, "G":0, "T":0, "N":0, "-":0}
@@ -473,13 +489,13 @@ def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_0
         for i in range(len(num_primers)):
             tracking_depth.append([0,0,0,0,0,0])
         for i, (nuc, primer) in enumerate(value.items()):
-            if total_depth == 0:
+            if total_depth == 0 or nuc == "-" or nuc == "N":
                 continue
             associated_reads = read_dict[key][nuc]
-            if len(associated_reads)/total_depth < 0.03:
+            if len(associated_reads)/total_depth < 0.03 or len(associated_reads) < 10:
                 continue            
             if DEBUG:
-                print("\n", key, nuc)
+                print("\n", key, nuc, "total count", len(associated_reads))
             unique, counts = np.unique(primer, return_counts=True)
             unique = list(unique)
             counts = list(counts)
@@ -502,7 +518,6 @@ def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_0
             a[np.isnan(a)] = 0
             a = a.T 
             a = a[~np.all(a == 0, axis=1)]
-            threshold = 0.05
             flag = False
             b = []
             for i in range(a.shape[1]):
@@ -526,28 +541,31 @@ def parse_bam_depth_per_position(bam_file, bed_file, variants_json, contig="NC_0
             if flag:
                 flagged_dist.append(key)
                 value_flagged_dist.append(b)
-
+    if DEBUG:
+        sys.exit(0) 
+    
     unique_link, link_counts = np.unique(phys_link_list, return_counts=True)
     total_link_counts = []
     total_unique_links = []
     total_possible_links = []
     
-    start_total_co = [x[0] for x in total_co_occurences]
-    arr = np.array(start_total_co)
     for i, (ul, lc) in enumerate(zip(unique_link, link_counts)):
         if len(ul) <= 1 or lc < 10:
             continue
         tlc = 0
+        ul = ul.split("_")
         ul_pos = [int(x[:-1]) for x in ul]
+        ul_pos.sort()
+        first = ul_pos[0]
+        last = ul_pos[-1]
         for tco_tmp in total_co_occurences:
-            if all(item in tco_tmp for item in ul_pos):
+            if tco_tmp[0] <= first and tco_tmp[-1] >= last:
+            #if all(item in tco_tmp for item in ul_pos):
                 tlc += 1
         total_possible_links.append(float(tlc))
-        total_unique_links.append(ul)
+        total_unique_links.append("_".join(ul))
         total_link_counts.append(float(lc))
         
-    if DEBUG:
-        sys.exit(0) 
     tmp_dict = {"flagged_dist":flagged_dist, "variants":variants, "total_possible_links":total_possible_links, "total_unique_links":total_unique_links, "total_link_counts":total_link_counts, "value_flagged_dist":value_flagged_dist}
     
     with open(variants_json, "w") as bfile:
