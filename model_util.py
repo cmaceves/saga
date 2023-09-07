@@ -19,13 +19,11 @@ import matplotlib.pyplot as plt
 from scipy import stats
 from scipy import spatial
 from scipy.spatial import distance
-from joblib import Parallel, delayed
 from sklearn.mixture import GaussianMixture
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.neighbors import KernelDensity
 from sklearn.decomposition import PCA
 from line_profiler import LineProfiler
-from memory_profiler import profile
 
 import file_util
 import generate_consensus 
@@ -347,22 +345,31 @@ def define_kde(frequencies, complexity, num, total_return_length, freq_precision
    
     tmp = copy.deepcopy(peak_list)
     tmp.sort(reverse=True)
+
     keep_tmp = []
+    keep_idx = []
+    peakos = []
     for t in tmp:
         idx = peak_list.index(t)
         ev = eval_points[list(a).index(peak_list[idx])]
         if round(ev, freq_precision) != 0:
             keep_tmp.append(t)
-        if len(keep_tmp) == total_return_length:
-            break
+        if round(ev, freq_precision) not in peakos:
+            peakos.append(round(ev, freq_precision))
+        #if len(peakos) == total_return_length:
+        #    break
+        print(t, round(ev,2))
     tmp = keep_tmp
+    #peakos.sort()
+    print(peakos)
+    sys.exit(0)
     for i, xx in enumerate(eval_points):
         if i in ind:
             idx = ind.index(i)
             if peak_list[idx] in tmp:
                 tmp.remove(peak_list[idx])
                 val = round(xx, freq_precision)
-                if val > 0:
+                if val > 0 and val not in peak:
                     peak.append(val)
     return(peak)
 
@@ -541,7 +548,7 @@ def create_complexity_estimate(total_mut_pos):
     complexity = "high"
     if scaled_complexity_estimate < 0.0002:
         complexity = "singular"
-    elif scaled_complexity_estimate < 0.00085:
+    elif scaled_complexity_estimate < 0.0009:
         complexity = "extremely low"
     elif scaled_complexity_estimate < 0.02:
         complexity = "low"
@@ -598,8 +605,7 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
         total_mutated_pos, training_removed = file_util.parse_variants(primer_dict, primer_positions, reference_sequence)
     complexity, complexity_estimate = create_complexity_estimate(total_mutated_pos)
     collapse_value = 0.05
-    if complexity == "singular":
-        return(1)
+
     #this may be expanded in future iterations for more complex samples
     if complexity == "low":
         r_min = 4
@@ -682,9 +688,11 @@ def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyj
             kde_data.append(f)
       
     num = 3000
+    print(kde_data)
     refined_kde_peaks = define_kde(kde_data, complexity, num, total_return_length, freq_precision)
     refined_kde_peaks.sort(reverse=True)
-    
+    print(refined_kde_peaks)
+    sys.exit(0)    
     #if we have no data
     if len(refined_kde_peaks) == 0 or len(new_frequencies) == 0:
         return(1)
