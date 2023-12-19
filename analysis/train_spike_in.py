@@ -5,7 +5,7 @@ import argparse
 import numpy as np
 from joblib import Parallel, delayed
 sys.path.insert(0, "../")
-from model import run_model, call_consensus
+from model_util import run_model, call_consensus
 from generate_consensus import write_fasta
 
 
@@ -28,11 +28,13 @@ def main():
     all_files = [os.path.join(directory_bam, x) for x in sample_ids if x.endswith(".bam")]
     sample_ids = [x.split("_sorted")[0] for x in sample_ids if x.endswith(".bam")]
     sample_ids = list(np.unique(sample_ids))
-    
+
+    print(sample_ids)
+    #sys.exit(0)
     #train_parallel(sample_ids, directory_bam, directory_variants, reference_file, bed_file)
-    
-    #145, 122, 340, 377, 300, 108, 134, 16, 316, 352
-    train("file_300", directory_bam, directory_variants, reference_file, bed_file)
+    #352, 220, 368, 136, 360
+    #292, 136
+    train("file_340", directory_bam, directory_variants, reference_file, bed_file)
 
 def train(sample_id, directory_bam, directory_variants, reference_file, bed_file, run_new_model=True):
     tmp = sample_id.split("_")[:2]
@@ -47,15 +49,23 @@ def train(sample_id, directory_bam, directory_variants, reference_file, bed_file
 
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")    
     model_location = os.path.join(output_dir, output_name+"_model.pkl")
+    """
+    if os.path.isfile(model_location):
+        print("model built already")
+        return(0)
+    """
     if run_new_model:
         exit_code = run_model(output_dir, output_name, bam_file, bed_file, reference_file)
+        print("finished %s" %sample_id)
         if exit_code == 1:
             return(1)
     
     if not os.path.isfile(model_location):
         print("model not found")
         return(1)
-    call_consensus(output_dir, output_name, model_location, reference_file, bed_file)
+    exit_code = call_consensus(output_dir, output_name, model_location, reference_file, bed_file)
+    if exit_code == 1:
+        return(1)
     with open(text_file, "r") as tfile:
         for i, line in enumerate(tfile):
             line = line.strip()
@@ -66,12 +76,14 @@ def train(sample_id, directory_bam, directory_variants, reference_file, bed_file
             print("no call", no_call)
             tmp_dict = {}
             for k,v in model_dict.items():
-                if k not in no_call:
+                if k.split("_")[2] not in no_call:
                     tmp_dict[k] = v
             model_dict = tmp_dict
             problem_positions = []
-            problem_positions.extend(model_dictionary['call_ambiguity'])
-            problem_positions.extend(model_dictionary['low_depth_positions'])
+            for k, v in model_dictionary['call_ambiguity'].items():
+                v = v['reason'] 
+                if "low_depth" in v or "amp_flux" in v or "outlier" in v:
+                    problem_positions.append(k)
     write_fasta(model_dict, output_fasta_name, reference_file, problem_positions, removal_dict)
     print("finished %s" %output_dir)
     return(0)

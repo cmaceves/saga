@@ -4,7 +4,7 @@ import sys
 def write_fasta(autoencoder_dict, output_name, reference, problem_positions, removal_dict):
     ref_seq = ""
     problem_positions = [int(x) for x in problem_positions]
-
+    
     with open("%s" %output_name, "w") as ffile:
         pass
 
@@ -15,11 +15,14 @@ def write_fasta(autoencoder_dict, output_name, reference, problem_positions, rem
             line = line.strip()
             ref_seq += line
 
-    min_key = autoencoder_dict.keys()
     for key, value in autoencoder_dict.items():
-        if float(key) < 0.05:
-            continue
-        removal_variants = [int(x[:-1])  for x in removal_dict[key]]
+        removal_variants = []
+        for x in removal_dict[key]:
+            if "+" not in x:
+                removal_variants.append(int(x[:-1]))
+            else:
+                x = x.split("+")[0]
+                removal_variants.append(int(x))
         trial_muts = autoencoder_dict[key]
         positions = []
         mutations = []
@@ -60,7 +63,7 @@ def write_fasta(autoencoder_dict, output_name, reference, problem_positions, rem
                 final_seq += ref_seq[i-1]
 
         with open("%s" %output_name, "a") as ffile:
-            ffile.write(">%s" %str(round(float(key),2)))
+            ffile.write(">%s" %str(key))
             ffile.write("\n")
             ffile.write(final_seq)
             ffile.write("\n")

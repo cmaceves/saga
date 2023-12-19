@@ -16,12 +16,11 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from Levenshtein import distance
 from scipy import stats
 from scipy.spatial.distance import cosine
 from line_profiler import LineProfiler
 sys.path.insert(0, "../")
-from model import run_model, generate_combinations
+from model_util import run_model, generate_combinations
 import file_util
 from generate_consensus import write_fasta
 
@@ -40,7 +39,73 @@ mix_palette = {"100":'#fff5eb',"95/5":'#fee6ce',"90/10":'#fdd0a2',"80/20":'#fdae
 
 #wastewater versus simulated wastewater versus spike in
 sample_type_palette = ['#7570b3', '#d95f02', '#1b9e77']
+def r2(x, y):
+    return stats.pearsonr(x, y)[0] ** 2
 
+def beta_distribution_analysis(gt_dict, samples):
+    """
+    Looking at the models built using beta distributions.
+    """
+
+    samples = ["file_348"]
+    centroid_reg_x = []
+    centroid_reg_y = []
+
+    for i, sample_id in enumerate(samples):
+        if sample_id not in gt_dict:
+            continue
+        output_dir = "/home/chrissy/Desktop/saga_spike_in_results/" + sample_id
+        beta_filename = os.path.join(output_dir, "%s_beta_dist.json"%sample_id)
+        #assignment filename 
+        #example: file_0_assignments.json 
+        assignment_filename = os.path.join(output_dir, "%s_assignments.json"%sample_id)
+        if not os.path.isfile(beta_filename):
+            continue
+        if not os.path.isfile(assignment_filename):
+            continue
+        print(sample_id)
+        gt = gt_dict[sample_id]
+        gt_centroids = gt['gt_centers']
+        with open(beta_filename, 'r') as bfile:
+            data = json.load(bfile)
+            solutions = data['solutions']
+            distributions = data['distributions']
+            frequency = data['frequency']
+        with open(assignment_filename, 'r') as bfile:
+            assignment_data = json.load(bfile)
+            variants_dict = assignment_data['variants']
+
+        ##PLOT A
+        #process data for the linear regression plot
+        predicted_centroids = [float(x) for x in list(variants_dict.keys())]
+        predicted_centroids.sort(reverse=True)
+        gt_centroids.sort(reverse=True)
+        if len(gt_centroids) != len(predicted_centroids):
+            diff = len(gt_centroids) - len(predicted_centroids)
+            tmp = [0.0] * abs(diff)
+            if diff < 0:
+                gt_centroids.extend(tmp)    
+            else:
+                predicted_centroids.extend(tmp)
+        if np.isnan(predicted_centroids).any():
+            continue
+        print(predicted_centroids)
+        print(solutions)
+        print(gt_centroids)
+        centroid_reg_x.extend(gt_centroids)
+        centroid_reg_y.extend(predicted_centroids)
+    ##PLOT A
+    plt.clf()
+    plt.close()
+    sns.regplot(x=centroid_reg_x, y=centroid_reg_y)
+    r = r2(centroid_reg_x, centroid_reg_y)
+    print("r2", r)
+    plt.plot( [0,1],[0,1], color="purple")
+    plt.tight_layout()
+    plt.savefig("./figures/beta/beta_plot_a.pdf")    
+    plt.clf()
+    plt.close()
+      
 def main():
     #simulated data location
     simulated_dir = "./simulated_data_results/"
@@ -53,31 +118,19 @@ def main():
 
     finished_files = "/home/chrissy/Desktop/saga_spike_in_results"
     finished_spikes = os.listdir(finished_files)
-
     sample_ids = os.listdir(directory_bam)           
     all_files = [os.path.join(directory_bam, x) for x in sample_ids if x.endswith(".bam")]
     sample_ids = [x.split("_sorted")[0] for x in sample_ids if x.endswith(".bam")]
     sample_ids = list(np.unique(sample_ids))
    
     gt_dict = parse_spike_in_metadata()
+    beta_distribution_analysis(gt_dict, finished_spikes)
+    sys.exit(0)
     
     pure_sample_dict = find_100_percent(gt_dict)
     exclude_positions, consensus_calls, ambiguous_nts = pure_consensus(finished_spikes, pure_sample_dict)
     pure_consensus_dict = subpopulation_pure_consensus(finished_spikes, pure_sample_dict)
-
-    
-    """
-    done_files = []
-    with open("stdout.txt", "r") as tfile:
-        for line in tfile:
-            line = line.strip()
-            if "file_" in line:
-                ll = line.split("file_")[-1]
-                number = ll.split(" ")[0].strip()
-                done_files.append("file_"+number)
-    done_files = list(np.unique(done_files))
-    """
-
+        
     """
     - which things do we call consensus on
     """
@@ -92,8 +145,13 @@ def main():
     - boxplot of edit distance vs. lineage vs. frequency
     - shows that distance from gt consensus varies with lineage and frequency
     """
-    finished_spikes = ["file_300"]
-    load_compare_consensus(exclude_positions, consensus_calls, finished_spikes, gt_dict, ambiguous_nts, pure_consensus_dict) 
+    ivar_spike_dict = ivar_spike_in(gt_dict, pure_sample_dict, consensus_calls, exclude_positions, ambiguous_nts)
+    #sys.exit(0)
+    #finished_spikes = ["file_124"]
+    #compare_ivar_saga(ivar_spike_dict, gt_dict, consensus_calls, ambiguous_nts, exclude_positions)
+    lower_population_ivar_saga(ivar_spike_dict, gt_dict, consensus_calls, ambiguous_nts, exclude_positions)
+   
+    #load_compare_consensus(exclude_positions, consensus_calls, finished_spikes, gt_dict, ambiguous_nts, pure_consensus_dict) 
 
     #build_centroid_plot(finished_spikes, gt_dict)   
     #print(finished_spikes)
@@ -103,6 +161,400 @@ def main():
 
     #build_complexity_plot(finished_spikes, gt_dict, simulated_files)
     #build_r_value_plot(finished_spikes, directory_bam, gt_dict)
+
+def lower_population_ivar_saga(ivar_spike_dict, gt_dict, consensus_calls, ambiguous_nts, exclude_positions):
+    #how well does saga recover the lower population?
+    ivar_wrong_saga_n = []
+    ivar_right_saga_n = []
+
+    ivar_wrong_saga_wrong = []
+    ivar_right_saga_wrong = []
+
+    ivar_n_saga_right = []
+    ivar_n_saga_wrong = []
+    seen_samples = []
+
+    ivar_wrong = []
+    status = []
+    all_mix_types = []
+    for filename, i_consensus in ivar_spike_dict.items():
+        if "file" not in filename:
+            continue
+        sample_id = filename.split("_sorted")[0].split("Consensus_")[1]
+
+        #EXCEPTION
+        if sample_id == "file_0" or sample_id == "file_200" or sample_id == "file_208" or sample_id == "file_60":
+            continue
+        if sample_id not in gt_dict:
+            continue
+
+        gt_centers = gt_dict[sample_id]['gt_centers']
+        gt_lineages = gt_dict[sample_id]['gt_lineages']
+        zipped = list(zip(gt_centers, gt_lineages))
+        zipped.sort(reverse=True)
+        gt_centers, gt_lineages = zip(*zipped)
+        if len(gt_centers) != 2:
+            continue
+        mix_type = "/".join([str(int(x*100)) for x in gt_centers])
+        
+        model_json = os.path.join("/home/chrissy/Desktop/saga_spike_in_results", sample_id, sample_id+"_model_results.txt")
+        if os.path.isfile(model_json):
+            with open(model_json, "r") as mfile:
+                model_dict = json.load(mfile)
+                percent_not_used = model_dict['percent_not_used']
+        output_dir = "/home/chrissy/Desktop/saga_spike_in_results/" + sample_id
+        fasta = output_dir + "/" + sample_id + ".fa"
+        if not os.path.isfile(fasta):
+            continue
+        print("\n", gt_centers)
+        print(gt_lineages)
+        print(sample_id)
+        print(percent_not_used)
+        noise = False
+        for i,(key, value) in enumerate(percent_not_used.items()):
+            if value > 0.15:
+                noise=True
+                print("too much noise")
+                break
+            if i == 0:
+                break 
+        if noise:
+            status.append("no consensus call")
+        else:
+            status.append("call consensus")
+        all_mix_types.append(mix_type)
+        s_consensus = ""
+        name = ""
+        all_con_exp = {}
+        print(ambiguous_nts['B.1.617.2'])
+        with open(fasta, "r") as ffile:
+            for i, line in enumerate(ffile):
+                if line.startswith(">"):
+                    name = line.strip()
+                    all_con_exp[name] = ""
+                    continue
+                #elif line.startswith(">") and i != 0 and i != 2 and "peak_2" not in line:
+                #    break
+                else:
+                    #if name != "":
+                    s_consensus += line.strip()
+                    all_con_exp[name] += line.strip()
+        diff_count = 0
+        pos_diff = []
+        print(name)
+        print(all_con_exp.keys())
+        con_1 = all_con_exp['>peak_0_0.92']
+        con_2 = all_con_exp['>peak_2_0.07']
+        for j,(a, b) in enumerate(zip(con_1, con_2)):
+            if a != b:
+                print(j, a ,b)
+        sys.exit(0)
+        diff = 29000
+        lineage_use = ""
+        for lineage in gt_lineages:
+            gt_consensus = consensus_calls[lineage][0]
+            count_lin = count_nucleotide_differences(s_consensus, gt_consensus, exclude_positions[lineage])
+            if count_lin < diff:
+                lineage_use = lineage
+                diff = count_lin
+            print(lineage, count_lin)
+        print(lineage_use) 
+        gt_consensus = consensus_calls[lineage_use][0]           
+        exclude = exclude_positions[lineage_use]
+        amb = ambiguous_nts[lineage_use]
+        exclude.extend(list(amb.keys()))
+        exclude.sort()
+        exclude = [int(x) for x in exclude]
+        civar_wrong_saga_n = 0
+        civar_right_saga_n = 0
+        print(ambiguous_nts)
+        civar_wrong_saga_wrong = 0
+        civar_right_saga_wrong = 0
+
+        civar_n_saga_right = 0
+        civar_n_saga_wrong = 0
+        civar_wrong = 0
+        for j, (i, s, truth) in enumerate(zip(i_consensus, s_consensus, gt_consensus)):
+            truth = truth.upper()
+            i = i.upper()
+            s = s.upper()
+            if j+1 in exclude:
+                continue
+            if truth == "N":
+                continue
+            if i == s and s == truth:
+                continue
+            if i != truth and i != "N":
+                civar_wrong += 1
+            if i != truth and s == "N":
+                civar_wrong_saga_n += 1
+            elif i == truth and s == "N":
+                print(j, "ivar", i, "saga", s, "truth", truth)
+                civar_right_saga_n += 1
+            elif i != truth and s != truth and i != "N" and s != "N":
+                print(j, "ivar", i, "saga", s, "truth", truth)
+                civar_wrong_saga_wrong += 1
+            elif i == truth and s != truth and s != "N":
+                print(j, "ivar", i, "saga", s, "truth", truth)
+                civar_right_saga_wrong += 1
+            elif i == "N" and s == truth:
+                civar_n_saga_right += 1
+            elif i == "N" and s != truth:
+                civar_n_saga_wrong += 1
+        sys.exit(0)        
+        ivar_wrong_saga_n.append(civar_wrong_saga_n)
+        ivar_right_saga_n.append(civar_right_saga_n)
+
+        ivar_wrong_saga_wrong.append(civar_wrong_saga_wrong)
+        ivar_right_saga_wrong.append(civar_right_saga_wrong)
+
+        ivar_n_saga_right.append(civar_n_saga_right)
+        ivar_n_saga_wrong.append(civar_n_saga_wrong)       
+        ivar_wrong.append(civar_wrong)
+        seen_samples.append(sample_id)
+    print("ivar wrong saga n", ivar_wrong_saga_n)
+    #print("ivar right saga n", ivar_right_saga_n)
+    
+    df = pd.DataFrame({"ivar_wrong":ivar_wrong, "filename":seen_samples, "status":status, "mix_type":all_mix_types})
+    df = df[df['status'] == "no consensus call"]
+    colors = [mix_palette[x] for x in df['mix_type'].tolist()]
+    df['color'] = colors
+    purple_patch = mpatches.Patch(color='#f16913', label='50/50')
+    orange_patch = mpatches.Patch(color='#fd8d3c', label='60/40')
+    red_patch = mpatches.Patch(color='#fdae6b', label='80/20')
+    plt.legend(handles=[purple_patch, orange_patch, red_patch], title="mixture type")
+    plt.bar(x=df['filename'].tolist(), height=df['ivar_wrong'].tolist(), color=df['color'].tolist(), width = 0.5)
+    plt.xticks(rotation=45)
+    plt.ylabel("# NT Wrongly Called by iVar")
+    plt.tight_layout()
+    #plt.savefig("./figures/no_consensus_call.png")
+    plt.close()
+    plt.clf()
+
+
+    df = pd.DataFrame({"ivar_wrong_saga_n":ivar_wrong_saga_n, "filename":seen_samples, "status":status, "mix_type":all_mix_types})
+    df = df[df['status'] != "no consensus call"]
+    cut_categories = [x for x in categories if x in df['mix_type'].tolist()]
+    sns.boxplot(y="ivar_wrong_saga_n", x="mix_type", data=df, order=cut_categories, palette=mix_palette)
+    plt.ylabel("# NT Wrongly Called by iVar, N in Saga")
+    plt.tight_layout()
+    #plt.savefig("./figures/consensus_corrections.png")
+    plt.close()
+    plt.clf()    
+
+    #print("both wrong", ivar_wrong_saga_wrong)
+    print("ivar right saga wrong", ivar_right_saga_wrong)
+    for a, b, c, d in zip(seen_samples, ivar_right_saga_wrong, ivar_wrong_saga_n, status):
+        if status == "no consensus call":
+            continue
+        if c > 0:
+            print(a, b, c)   
+    
+    #print(ivar_n_saga_right)
+    #print(ivar_n_saga_wrong)
+ 
+def compare_ivar_saga(ivar_spike_dict, gt_dict, consensus_calls, ambiguous_nts, exclude_positions):
+    """
+    On a file by file basis, compare the highest value consensus sequences to the "ground truth".
+    """
+    #plot 1: how does saga "clean up" the higher consensus sequence in mixtures of two things
+    ivar_wrong_saga_n = []
+    ivar_right_saga_n = []
+
+    ivar_wrong_saga_wrong = []
+    ivar_right_saga_wrong = []
+
+    ivar_n_saga_right = []
+    ivar_n_saga_wrong = []
+    seen_samples = []
+
+    ivar_wrong = []
+    status = []
+    all_mix_types = []
+    for filename, i_consensus in ivar_spike_dict.items():
+        if "file" not in filename:
+            continue
+        sample_id = filename.split("_sorted")[0].split("Consensus_")[1]
+
+        #EXCEPTION
+        if sample_id == "file_0" or sample_id == "file_200" or sample_id == "file_208" or sample_id == "file_60":
+            continue
+        if sample_id not in gt_dict:
+            continue
+        gt_centers = gt_dict[sample_id]['gt_centers']
+        gt_lineages = gt_dict[sample_id]['gt_lineages']
+        zipped = list(zip(gt_centers, gt_lineages))
+        zipped.sort(reverse=True)
+        gt_centers, gt_lineages = zip(*zipped)
+        if len(gt_centers) != 2:
+            continue
+        mix_type = "/".join([str(int(x*100)) for x in gt_centers])
+        
+        model_json = os.path.join("/home/chrissy/Desktop/saga_spike_in_results", sample_id, sample_id+"_model_results.txt")
+        if os.path.isfile(model_json):
+            with open(model_json, "r") as mfile:
+                model_dict = json.load(mfile)
+                percent_not_used = model_dict['percent_not_used']
+        output_dir = "/home/chrissy/Desktop/saga_spike_in_results/" + sample_id
+        fasta = output_dir + "/" + sample_id + ".fa"
+        if not os.path.isfile(fasta):
+            continue
+        print("\n", gt_centers)
+        print(gt_lineages)
+        print(sample_id)
+        print(percent_not_used)
+        noise = False
+        for i,(key, value) in enumerate(percent_not_used.items()):
+            if value > 0.15:
+                noise=True
+                print("too much noise")
+                break
+            if i == 0:
+                break 
+        if noise:
+            status.append("no consensus call")
+        else:
+            status.append("call consensus")
+        all_mix_types.append(mix_type)
+        s_consensus = ""
+        with open(fasta, "r") as ffile:
+            for i, line in enumerate(ffile):
+                if line.startswith(">") and i == 0:
+                    name = line.strip()
+                    continue
+                elif line.startswith(">") and i != 0:
+                    break
+                else:
+                    s_consensus += line.strip()
+        diff_count = 0
+        pos_diff = []
+
+        diff = 29000
+        lineage_use = ""
+        for lineage in gt_lineages:
+            gt_consensus = consensus_calls[lineage][0]
+            count_lin = count_nucleotide_differences(s_consensus, gt_consensus, exclude_positions[lineage])
+            if count_lin < diff:
+                lineage_use = lineage
+                diff = count_lin
+            print(lineage, count_lin)
+        print(lineage_use) 
+        gt_consensus = consensus_calls[lineage_use][0]           
+        exclude = exclude_positions[lineage_use]
+        amb = ambiguous_nts[lineage_use]
+        exclude.extend(list(amb.keys()))
+        exclude.sort()
+        exclude = [int(x) for x in exclude]
+        #print(exclude)    
+        civar_wrong_saga_n = 0
+        civar_right_saga_n = 0
+
+        civar_wrong_saga_wrong = 0
+        civar_right_saga_wrong = 0
+
+        civar_n_saga_right = 0
+        civar_n_saga_wrong = 0
+        civar_wrong = 0
+        for j, (i, s, truth) in enumerate(zip(i_consensus, s_consensus, gt_consensus)):
+            truth = truth.upper()
+            i = i.upper()
+            s = s.upper()
+            if j+1 in exclude:
+                continue
+            if truth == "N":
+                continue
+            if i == s and s == truth:
+                continue
+            if i != truth and i != "N":
+                civar_wrong += 1
+            if i != truth and s == "N":
+                civar_wrong_saga_n += 1
+            elif i == truth and s == "N":
+                #print(j, "ivar", i, "saga", s, "truth", truth)
+                civar_right_saga_n += 1
+            elif i != truth and s != truth and i != "N" and s != "N":
+                #print(j, "ivar", i, "saga", s, "truth", truth)
+                civar_wrong_saga_wrong += 1
+            elif i == truth and s != truth and s != "N":
+                print(j, "ivar", i, "saga", s, "truth", truth)
+                civar_right_saga_wrong += 1
+            elif i == "N" and s == truth:
+                civar_n_saga_right += 1
+            elif i == "N" and s != truth:
+                civar_n_saga_wrong += 1
+        
+        ivar_wrong_saga_n.append(civar_wrong_saga_n)
+        ivar_right_saga_n.append(civar_right_saga_n)
+
+        ivar_wrong_saga_wrong.append(civar_wrong_saga_wrong)
+        ivar_right_saga_wrong.append(civar_right_saga_wrong)
+
+        ivar_n_saga_right.append(civar_n_saga_right)
+        ivar_n_saga_wrong.append(civar_n_saga_wrong)       
+        ivar_wrong.append(civar_wrong)
+        seen_samples.append(sample_id)
+    print("ivar wrong saga n", ivar_wrong_saga_n)
+    #print("ivar right saga n", ivar_right_saga_n)
+    
+    df = pd.DataFrame({"ivar_wrong":ivar_wrong, "filename":seen_samples, "status":status, "mix_type":all_mix_types})
+    df = df[df['status'] == "no consensus call"]
+    colors = [mix_palette[x] for x in df['mix_type'].tolist()]
+    df['color'] = colors
+    purple_patch = mpatches.Patch(color='#f16913', label='50/50')
+    orange_patch = mpatches.Patch(color='#fd8d3c', label='60/40')
+    red_patch = mpatches.Patch(color='#fdae6b', label='80/20')
+    plt.legend(handles=[purple_patch, orange_patch, red_patch], title="mixture type")
+    plt.bar(x=df['filename'].tolist(), height=df['ivar_wrong'].tolist(), color=df['color'].tolist(), width = 0.5)
+    plt.xticks(rotation=45)
+    plt.ylabel("# NT Wrongly Called by iVar")
+    plt.tight_layout()
+    plt.savefig("./figures/no_consensus_call.png")
+    plt.close()
+    plt.clf()
+
+
+    df = pd.DataFrame({"ivar_wrong_saga_n":ivar_wrong_saga_n, "filename":seen_samples, "status":status, "mix_type":all_mix_types})
+    df = df[df['status'] != "no consensus call"]
+    cut_categories = [x for x in categories if x in df['mix_type'].tolist()]
+    sns.boxplot(y="ivar_wrong_saga_n", x="mix_type", data=df, order=cut_categories, palette=mix_palette)
+    plt.ylabel("# NT Wrongly Called by iVar, N in Saga")
+    plt.tight_layout()
+    plt.savefig("./figures/consensus_corrections.png")
+    plt.close()
+    plt.clf()    
+    sys.exit(0)
+    #print("both wrong", ivar_wrong_saga_wrong)
+    print("ivar right saga wrong", ivar_right_saga_wrong)
+    for a, b, c, d in zip(seen_samples, ivar_right_saga_wrong, ivar_wrong_saga_n, status):
+        if status == "no consensus call":
+            continue
+        if c > 0:
+            print(a, b, c)   
+    
+    #print(ivar_n_saga_right)
+    #print(ivar_n_saga_wrong)
+    
+  
+def ivar_spike_in(gt_dict, pure_sample_dict, consensus_calls, exclude_positions, ambiguous_nts):
+    """
+    Parse multialignment file to get all sequences called using ivar.
+    """
+    aligned_filename = "./multi_aligned.fa"
+    ivar_spike_dict = {}
+    with open(aligned_filename, "r") as ffile:
+        name = ""
+        tmp = ""
+        for line in ffile:
+            line = line.strip()
+            if line.startswith(">"):
+                if tmp != "":
+                    ivar_spike_dict[name] = tmp                
+                name = line
+                tmp = ""
+            else:
+                tmp += line
+            
+    return(ivar_spike_dict)
 
 def barplot_consensus_boolean(samples, gt_dict):
     """
@@ -132,8 +584,9 @@ def barplot_consensus_boolean(samples, gt_dict):
         if os.path.isfile(model_json):
             with open(model_json, "r") as mfile:
                 model_dict = json.load(mfile)
-                if "removal_points" not in model_dict:
+                if "low_depth_positions" in model_dict:
                     continue
+                print(model_dict.keys())
                 autoencoder_dict = model_dict['autoencoder_dict']
                 consensus_dict = model_dict['consensus_dict']
                 predicted_centers = [float(x) for x in list(autoencoder_dict.keys())]
@@ -258,48 +711,64 @@ def find_lineage_consensus(gt_lineages, consensus_calls, mix_consensus, ambiguou
     return(matched_lineages, nt_diff_count)
 
 def load_compare_consensus(exclude_positions, consensus_calls, samples, gt_dict, ambiguous_nts, pure_consensus_dict):
-    x = [] #frequency (categorical)
-    y = [] #edit distance (continuous)
-    hue = [] #lineage (categorical)
-    seen_samples = []
-    all_percent_not = []
-    centroid = [] #experimental centroid
+    #plot 1 : 
+    mix_types_gt = []
+    unplaced_nts = []
 
-
-    perc_not_used = []
-    nt_diff = []
-    f = []
-    all_samples = []
     for sample_id in samples:
         if sample_id not in gt_dict:
             continue
         output_dir = "/home/chrissy/Desktop/saga_spike_in_results/" + sample_id
         fasta = output_dir + "/" + sample_id + ".fa"
+
         mix_consensus = {}
         gt_lineages = gt_dict[sample_id]['gt_lineages']
         gt_frequencies = gt_dict[sample_id]['gt_centers']
         zipped = list(zip(gt_frequencies, gt_lineages))
         zipped.sort(reverse=True)
         gt_frequencies, gt_lineages = zip(*zipped)
+        mix_string = "/".join([str(x) for x in gt_frequencies])
 
         output_name = sample_id
         model_json = os.path.join(output_dir, output_name+"_model_results.txt")
-        if os.path.isfile(model_json):
-            with open(model_json, "r") as mfile:
-                model_dict = json.load(mfile)
-                ambiguity_dict = model_dict["ambiguity_dict"]
-                autoencoder_dict = model_dict['autoencoder_dict']
-                no_call = model_dict['no_call']
-                call_ambiguity = model_dict['call_ambiguity']
-                low_depth = model_dict['low_depth_positions']
-                percent_not_used = model_dict['percent_not_used']
-                removal_dict = model_dict['removal_dict']
-        else:
+        if not os.path.isfile(model_json):
             continue
-        
+        with open(model_json, "r") as mfile:
+            model_dict = json.load(mfile)
+        if "low_depth_positions" in model_dict:
+            continue
+        ambiguity_dict = model_dict["ambiguity_dict"]
+        autoencoder_dict = model_dict['autoencoder_dict']
+        no_call = model_dict['no_call']
+        call_ambiguity = model_dict['call_ambiguity']
+        percent_not_used = model_dict['percent_not_used']
+        removal_dict = model_dict['removal_dict']
+   
         print("\nanalyze...", sample_id)
         print("percent not used...", percent_not_used)
-        
+
+        #for plot 1
+        consensuses = [x for x in list(autoencoder_dict.keys()) if float(x.split("_")[2]) not in no_call]
+        call_ambiguity_count = 0
+        #count number of NTs that can't be assigned on basis of bad model fit/messy data
+        for key, value in call_ambiguity.items():
+            reasons = value['reason']
+            variants = value['variants']
+            populations = value['population']
+            if "outlier" in reasons:
+                call_ambiguity_count += len(consensuses)
+        total_assigned_mutations = []
+        for k, v in autoencoder_dict.items():
+            total_assigned_mutations.extend(v)
+        percent_not_assigned = call_ambiguity_count / (call_ambiguity_count+len(total_assigned_mutations))
+        print(mix_string)
+        print(percent_not_assigned) 
+        if percent_not_assigned >= 0.5:
+            print("HERE", percent_not_assigned, mix_string)
+        unplaced_nts.append(percent_not_assigned)
+        mix_types_gt.append(mix_string)        
+        continue
+
         print(gt_frequencies)
         print(autoencoder_dict.keys())
         print("no call", no_call)
@@ -330,17 +799,24 @@ def load_compare_consensus(exclude_positions, consensus_calls, samples, gt_dict,
             continue
         mix_keys = list(mix_consensus.keys())        
         matched_lineages, nt_diff_count = find_lineage_consensus(gt_lineages, consensus_calls, mix_consensus, ambiguous_nts, exclude_positions)
-        
         print("percent not used", percent_not_used)
         print("gt lineages", gt_lineages)
         print("matched_lineages", matched_lineages, "nt diff", nt_diff_count) 
-        
+        all_variants_pos = []
+        for k,v in autoencoder_dict.items():
+            p = [x[:-1] for x in v]
+            all_variants_pos.extend(p)
+        all_variants_pos = list(np.unique(all_variants_pos))
+        print(len(all_variants_pos))
+        print(len(call_ambiguity))
         for i,(k,v)  in enumerate(mix_consensus.items()):
             f.append(float(k))
             perc_not_used.append(percent_not_used[k])
             nt_diff.append(nt_diff_count[i])
             all_samples.append(sample_id)
-        #continue 
+            matches.append(matched_lineages)
+            mixes.append(gt_frequencies)
+        continue 
         #best_permutation = match_lineages_consensus(mix_keys, gt_lineages, gt_frequencies, consensus_calls, mix_consensus, exclude_positions, pure_consensus_dict)
         best_permutation_freq = []
         best_permutation = matched_lineages
@@ -380,26 +856,17 @@ def load_compare_consensus(exclude_positions, consensus_calls, samples, gt_dict,
             print("ground truth n:", ground_truth_n)
             print("consensus n:", consensus_n)
             y.append(count)
-   
-    #print(perc_not_used)
-    #print(nt_diff)
-    #print(f)
-    zipped = list(zip(nt_diff, perc_not_used, f, all_samples))
-    zipped.sort(reverse=True)
-    nt_diff, perc_not_used, f, all_samples = zip(*zipped)
-    for pnu, nt, fr,s in zip(perc_not_used, nt_diff, f, all_samples):
-        print(pnu, nt, fr, s)
-    sns.scatterplot(x=f, y=nt_diff, hue=perc_not_used)
-    plt.xlabel("predicted population frequency")
-    plt.ylabel("# nts incorrectly assigned")
+
+    #plot 1   
+        unplaced_nts.append(call_ambiguity_count)
+        mix_types_gt.append(mix_string)        
+
+    sns.boxplot(x=mix_types_gt, y=unplaced_nts)
+    plt.xlabel("mixture type")
+    plt.ylabel("# nts unable to be assigned")
+    plt.tight_layout()
     plt.savefig("./figures/regression_pernotused_wrong.pdf")
-    # x frequency (categorical)
-    # y edit distance (continuous)
-    # hue lineage (categorical)
-    #plt.tight_layout()
-    #sns.boxplot(x=x, y=y, hue=hue, palette=lineage_palette)
-    #plt.ylabel("Number of Nucleotide Differences")
-    #plt.savefig("./figures/consensus_boxplot.pdf", bbox_inches='tight')
+
 
 def subpopulation_pure_consensus(samples, gt_dict):
     possible_consensus_dict = {}
@@ -473,9 +940,10 @@ def pure_consensus(samples, gt_dict, consensus_threshold=0.95):
                 #print(gt_lineage, i, nuc_freq)
                 ambiguous_nts[gt_lineage][i].append(max(list(nuc_freq.values())))
                 canon = "N"
-            if i == 14786 and gt_lineage == "B.1.617.2":
-                print(i, canon)
-                print(nuc_freq)
+            #if (i == 22812) and gt_lineage == "B.1.617.2":
+            #    print(i, canon)
+            #    print(nuc_freq)
+            #    print(total_depth)
             sequence += canon
         consensus_calls[gt_lineage].append(sequence)
 
@@ -506,11 +974,15 @@ def find_100_percent(gt_dict):
     return(pure_sample_dict)
 
 def build_centroid_plot(samples, gt_dict):
-    mix_type = [] # x (categorical)
-    cosine_score = [] # y (continuous)
-    
+    gt_centroid = []
+    predicted_centroid = []
+    mix_type = [] 
     for sample_id in samples:
         if sample_id not in gt_dict:
+            continue
+        centers = gt_dict[sample_id]['gt_centers']
+        centers.sort(reverse=True)
+        if len(centers) != 2:
             continue
         #print(sample_id)
         output_dir = "/home/chrissy/Desktop/saga_spike_in_results/" + sample_id
@@ -520,10 +992,10 @@ def build_centroid_plot(samples, gt_dict):
         if os.path.isfile(model_json):
             with open(model_json, "r") as rfile:
                 model_dict = json.load(rfile)
-                predicted_centers = [float(x) for x in list(model_dict['autoencoder_dict'].keys())]
+                predicted_centers = list(model_dict['autoencoder_dict'].keys())
+                predicted_centers = [float(x.split("_")[-1]) for x in predicted_centers]
+                #print(predicted_centers)
                 predicted_centers.sort(reverse=True)
-                centers = gt_dict[sample_id]['gt_centers']
-                centers.sort(reverse=True)
                 mix = "/".join([str(int(x*100)) for x in centers])
                 mix_type.append(mix)
                 diff = len(centers) - len(predicted_centers)                
@@ -533,23 +1005,30 @@ def build_centroid_plot(samples, gt_dict):
                 elif diff < 0:
                     tmp = [0.0] * abs(diff)
                     centers.extend(tmp)
-                cos_score = cosine(predicted_centers, centers)
-                                
+                print(centers)
+                print(predicted_centers)                                
                 print("\n", sample_id, mix)
-                print(predicted_centers)
-                cosine_score.append(1-cos_score)
+                #print(predicted_centers)
+                predicted_centroid.extend(predicted_centers)
+                gt_centroid.extend(centers)
 
-    g = sns.boxplot(x=mix_type, y=cosine_score, order=categories, palette=mix_palette, hue_order=categories)
+    g = sns.regplot(x=gt_centroid, y=predicted_centroid, color="orange")
+    orange_patch = mpatches.Patch(color='orange', label='regression line')
+    red_patch = mpatches.Patch(color='purple', label='identity line')
+    plt.legend(handles=[orange_patch, red_patch])
+    plt.plot( [0,1],[0,1], color="purple")
     plt.tight_layout()
-    plt.ylabel("Cosine Similarity")
+    plt.ylabel("Predicted Population Frequency")
+    plt.xlabel("Ground Truth Population Frequency")
+    """
     plt.setp(g.axes, xticks=[], xlabel='') # remove x ticks and xlabel
     handles = []
     for category,color in zip(categories, mix_palette.values()): 
         patch = mpatches.Patch(color=color, label=category)
         handles.append(patch)
     plt.legend(handles=handles, loc="upper right", bbox_to_anchor=(1.4, 1.0))
-    plt.savefig("./figures/cosine_plot.pdf", bbox_inches='tight')
-    sys.exit(0)
+    """
+    plt.savefig("./figures/centroid.png", bbox_inches='tight')
 
 def build_complexity_plot(samples, gt_dict, simulated_files):
     """

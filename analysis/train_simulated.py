@@ -25,9 +25,10 @@ def train(sample_id, data_folder):
     #if "SEARCH-63543" not in sample_id: #fail case "hard"
     #if "SEARCH-63693" not in sample_id: #fail case
     #if "SEARCH-61650" not in sample_id: #fail case
+    #if "SEARCH-63543" not in sample_id:
     #if "SEARCH-63548" not in sample_id: #hard example, unsure if want to attempt
         return(1)
-    
+
     bam_file = os.path.join(data_folder, sample_id  + ".bam")
     bed_file = "/home/chrissy/Desktop/sarscov2_v2_primers.bed" 
     freyja_file = "./data/" + sample_id + "_L001_L002_freyja_results.tsv"
@@ -45,6 +46,7 @@ def train(sample_id, data_folder):
     print("creating results for ", sample_id)
     exit_code = run_model(output_dir, output_name, bam_file, bed_file, reference, freyja_file=freyja_file)
     return(0)
+
     if exit_code == 1:
         return(1)
     text_file = os.path.join(output_dir, output_name+"_model_results.txt")
@@ -52,7 +54,7 @@ def train(sample_id, data_folder):
         for i, line in enumerate(tfile):
             line = line.strip()
             model_dictionary = json.loads(line)
-            model_dict = model_dictionary['autoencoder_dict']
+            model_dict = model_dictionary['consensus_dict']
             problem_positions = model_dictionary['problem_positions']
             if problem_positions is not None:
                 problem_positions.extend(model_dictionary['low_depth_positions'])

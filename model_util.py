@@ -542,7 +542,10 @@ def find_masked_solution(solution_space, freq_precision):
         new_solution_space.append(solution)    
     return(new_solution_space)
              
-def create_complexity_estimate(total_mut_pos):
+def create_complexity_estimate(total_mut_pos, reference="", evolutionary_rate=0.001):
+    """
+    Estimate the complexity of the sample given a reference and an evolutionary rate.
+    """ 
     length_total_mut = len([x for x in total_mut_pos if x > 0.1])
     scaled_complexity_estimate = length_total_mut/(29903*3)
     complexity = "high"
