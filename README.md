@@ -1,24 +1,14 @@
 # Saga
-
 Tool for building consensus sequences from complex viral mixtures.
 
-### Methods
+## Use Instructions
 
-### SAGA
+### Input 
+- The input for this is a bed file, a reference fasta, a primer pairs tsv, and a variants file. The variants file can be output from the new ivar functionality in branch v_20 (experimental). 
 
+### Run
+- Use file ./analysis/run_numpyro_model.py to run the model
+- Modify this in-line, I don't have argparse set up yet
 
-
-## Novelty
-1. Returns ideal threshold for consensus calling
-2. Returns rough estimate of number of things in sample
-3. Determines whether consensus can be called
-4. Calls consensus on sub-majority populations if possible
-
-## Input
-1. ivar variants file generated with depth set to 0
-
-## Figures
-1. a. Workflow
-   b. Spike-in data
-     1. Predicted r vs. actual r value
-     2. Predicted centers vs. ground truth scatter plot
+### Enviornment
+- Environment specifics found in enviornment.yml
