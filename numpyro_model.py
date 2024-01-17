@@ -25,6 +25,7 @@ from scipy.stats import beta
 
 import model_util
 import file_util
+import frequency_mode_util
 DEBUG = False
 
 def map_solution_experimental_peaks(experimental, solution, combination_sums, combination_solutions, used_peaks):
@@ -527,11 +528,10 @@ def run_model(total_freq, n_val, num_warmup=50, num_samples=1000):
     Run model and return distribtuion objects
     """
     data = jnp.array(total_freq)
-    # Run mcmc
+    #run mcmc
     kernel = NUTS(model)
     mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples)
     mcmc.run(random.PRNGKey(112358), data=data, n=n_val)
-    #mcmc.print_summary()
     samples = mcmc.get_samples()
 
     fig, ax = plt.subplots(1, 1)
@@ -549,41 +549,80 @@ def run_model(total_freq, n_val, num_warmup=50, num_samples=1000):
         all_distributions.append(dist)
     return(all_distributions)
 
-def run_numpyro_model(sample_id, gt_mut_dict=None):
-    """
-    parser = argparse.ArgumentParser(description='Use numpyro to solve peaks in sample.')
-    parser.add_argument('-s','--sample_id', help='The name of the sample ID', required=True)
-    args = vars(parser.parse_args())
-    print(args)
-    sys.exit(0)
-    """
-    #print(jax.devices())
-    #print(jax.lib.xla_bridge.get_backend().platform)
-    #sys.exit(0)
+def run_numpyro_model(sample_id, output_dir, reference_file, bed_file, variants_file, sample_date): 
+    print(sample_id)
     numpyro.set_platform('cpu')
-
-    min_freq = 0.02
-    max_freq = 0.98    
+    min_freq = 0.01
+    max_freq = 0.99    
     decimal = 3
-
-    output_dir = "/home/chrissy/Desktop/saga_spike_in_results/" + sample_id
+    evolutionary_rate = 0.001
+    ref_date = "12-01-19"    
     output_file = output_dir + "/" + sample_id + "_beta_dist.json"
-    reference_file = "/home/chrissy/Desktop/sequence.fasta"
-    bed_file = "/home/chrissy/Desktop/sarscov2_v2_primers.bed"
     output_dict = {"solutions":[], "distributions":[], "frequency":[], "positions":[], "nucs":[], "complexity":"", "used_peaks":[]}
-    variants_file = "/home/chrissy/Desktop/saga/test_data/output_test.txt"
        
     reference_sequence = file_util.parse_reference_sequence(reference_file)
     primer_positions = file_util.parse_bed_file(bed_file)
-
+        
     #reference is True/False if nuc/pos combo is reference
-    frequency, nucs, positions, reference, flagged = file_util.parse_ivar_variants(variants_file, reference_sequence)
+    frequency, nucs, positions, reference, flagged, depth, quality = file_util.parse_ivar_variants(variants_file, reference_sequence)
+    print(len(frequency), len(nucs), len(reference), len(depth), len(quality))
+    #filter out data based on
+    # 1. avg quality < 20
+    # 2. depth < 10
+    # 3. flagged as being suspicious
+    # 4. small frequency
+
+    #filtered_frequency = [x for i,x in enumerate(frequency) if flagged[i] is False]
+    filtered_frequency = [x for x in frequency if min_freq < x < max_freq]
+    #print(len(filtered_frequency))
+
+    print("original freq", len(frequency))
+    mut_only = []
+    for i, f in enumerate(frequency):
+        if reference[i] is True:
+            continue
+        if depth[i] < 10:
+            continue
+        if f < 0.01:
+            continue
+        if "+" in nucs[i]:
+            continue
+        if quality[i] < 20:
+            continue
+        if flagged[i] is True:
+            continue
+        mut_only.append(f)
+    print("mut only", len(mut_only))
+
+    #complexity estimate
+    number_of_populations, n_min, n_max = model_util.create_complexity_estimate(mut_only, evolutionary_rate, reference_sequence, positions, ref_date, sample_date)
+    print("N Min", n_min)
+    print("N Max", n_max)
+    print("num pop", number_of_populations)    
+
+    #detection of initial modes
+    #modes = frequency_mode_util.kde(filtered_frequency) 
+    modes = frequency_mode_util.histogram(filtered_frequency, 100, dec=3)
+    print(np.unique(modes))
+
+    all_combos = pulp.allcombinations(modes, n_max-1)
+    error = 0.05 
+    possible_solutions = []
+    max_val = 1 + error
+    min_val = 1 - error
+        
+    for combo in all_combos:
+        if min_val < sum(combo) < max_val:
+            if combo not in possible_solutions:
+                if n_min <= len(combo) < n_max and combo not in possible_solutions:
+                    print(combo)
+                    possible_solutions.append(combo)
+    print("toal num solutions", len(possible_solutions))
     sys.exit(0)
 
-    frequency, nucs, positions, depth, low_depth_positions, reference_positions, ambiguity_dict, \
-        total_mutated_pos, training_removed = file_util.parse_variants(primer_dict, primer_positions, reference_sequence)
+    #frequency, nucs, positions, depth, low_depth_positions, reference_positions, ambiguity_dict, \
+    #    total_mutated_pos, training_removed = file_util.parse_variants(primer_dict, primer_positions, reference_sequence)
 
-    complexity, complexity_estimate = model_util.create_complexity_estimate(total_mutated_pos, reference_sequence)
 
     #print(complexity, complexity_estimate)
     og_frequency = copy.deepcopy(frequency)
@@ -669,15 +708,20 @@ def run_numpyro_model(sample_id, gt_mut_dict=None):
     #add in additional permutations in the event we will allow variants to be assigned to the same group
     conflict_permutations = copy.deepcopy(permutations)
     conflict_permutations.extend(create_conflict_permutations(n_max))
-    all_distributions = run_model(frequency, n_max)
     
+    #first pass model run 
+    all_distributions = run_model(frequency, n_max)
+   
+    #summarize each distribution
+    #example 0.10, 0.20 0.70
+    #define the solution space [0.10, 0.20, 0.70, 0.30, 1.0, 0.90] 
     assigned_pos, assigned_points, assigned_variants, total_prob, not_assigned, reason_not_assigned, removed_peak_dict = assign_points_groups(positions, frequency, conflict_permutations, conflicting_frequencies, permutations, all_distributions, x)
 
     means = []
     final_assigned_points = []
     for i, (ap, pos) in enumerate(zip(assigned_points, assigned_pos)):
         if len(ap) > 0:
-            print("\n", i, ap)
+            #print("\n", i, ap)
             means.append(round(np.mean(ap), decimal))
             final_assigned_points.append(ap)
         else:
@@ -691,21 +735,25 @@ def run_numpyro_model(sample_id, gt_mut_dict=None):
     for i in range(allow_resample):
         all_means.extend([x for x in means if x > 0.02])
     all_means.sort()
+
+    #all combination of possible things
+    #subset sum problem
     all_combos = pulp.allcombinations(all_means, r_max-1)
-    error = 0.05
+    error = 0.05 
     possible_solutions = []
     max_val = 1 + error
     min_val = 1 - error
     
     sorted_means = copy.deepcopy(means)
     sorted_means.sort()
-        
+    
     for combo in all_combos:
         if min_val < sum(combo) < max_val:
             if combo not in possible_solutions:
                 if r_min <= len(combo) < r_max and combo not in possible_solutions and sorted_means[0] in combo:
                     #print(combo)
-                    possible_solutions.append(combo)
+                    possible_solutions.append(combo) #possible solutions where each val is an individual thing
+    #possible solutions is a vector of solutions
 
     output_dict['solutions'] = []
     output_dict['positions'] = positions
@@ -713,9 +761,8 @@ def run_numpyro_model(sample_id, gt_mut_dict=None):
     output_dict['nucs'] = nucs 
     print("means", means)
     og_means = copy.deepcopy(means)
+
     for solution in possible_solutions:
-        if solution != (0.017, 0.196, 0.242, 0.242, 0.309):
-            continue
         print("\n")
         print(solution)
         solution = list(solution)
@@ -777,9 +824,11 @@ def run_numpyro_model(sample_id, gt_mut_dict=None):
 
         m = len(a_params)        
         #add in additional permutations in the event we will allow variants to be assigned to the same group
+        #look at each ESS per solution
         all_distributions = run_model(frequency, m, num_warmup=500, num_samples=3000)
         output_dict['distributions'].append([list(x) for x in list(all_distributions)])
         output_dict['used_peaks'].append(used_peaks)
+
     with open(output_file, "w") as ofile:    
         json.dump(output_dict, ofile)    
     return(0)

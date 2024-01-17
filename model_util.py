@@ -16,6 +16,7 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+from datetime import datetime
 from scipy import stats
 from scipy import spatial
 from scipy.spatial import distance
@@ -542,21 +543,31 @@ def find_masked_solution(solution_space, freq_precision):
         new_solution_space.append(solution)    
     return(new_solution_space)
              
-def create_complexity_estimate(total_mut_pos, reference="", evolutionary_rate=0.001):
+def create_complexity_estimate(frequency, evolutionary_rate, reference_sequence, positions, ref_date, sample_date):
     """
     Estimate the complexity of the sample given a reference and an evolutionary rate.
-    """ 
-    length_total_mut = len([x for x in total_mut_pos if x > 0.1])
-    scaled_complexity_estimate = length_total_mut/(29903*3)
-    complexity = "high"
-    if scaled_complexity_estimate < 0.0002:
-        complexity = "singular"
-    elif scaled_complexity_estimate < 0.0009:
-        complexity = "extremely low"
-    elif scaled_complexity_estimate < 0.02:
-        complexity = "low"
-    print("complexity estimate", scaled_complexity_estimate, complexity)
-    return(complexity, scaled_complexity_estimate)
+    """
+    beta = 4 #constant because as time progresses more mutations are shared!
+    num_upos_covered = len(list(np.unique(positions)))
+    print("num pos", num_upos_covered)
+    d1 = datetime.strptime(sample_date, "%m-%d-%y")
+    d2 = datetime.strptime(ref_date, "%m-%d-%y")
+    time_elapsed = (d1 - d2).days / 365
+    print(len(frequency))
+    print(time_elapsed)
+    percent_possible_mutations = (len(frequency) * beta)/(len(reference_sequence) * 3)
+    expected_nt_sub_per_site = evolutionary_rate * time_elapsed
+    print(percent_possible_mutations)
+    print(expected_nt_sub_per_site)
+    num_populations = percent_possible_mutations / expected_nt_sub_per_site
+    if num_populations < 4:
+        n_min = 2
+        n_max = 4
+    else:
+        n_min = round(num_populations) - 1
+        n_max = round(num_populations) + 1
+    
+    return(num_populations, n_min, n_max)
 
 def run_model(output_dir, output_name, bam_file, bed_file, reference_file, freyja_file=None):
     """

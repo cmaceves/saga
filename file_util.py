@@ -13,21 +13,32 @@ def parse_ivar_variants(filename, reference_sequence):
     """
     Takes in output from ivar 2.0 branch and creates useable data structure for model input.
     """
-    var_df = pd.read_table(filename)
-
+    var_df = pd.read_table(filename, index_col=None)
+     
     frequencies = [] 
     nucs = []
     positions = []
     reference = []
     flagged = []
-
+    depth = []
+    qualities = []    
     for index, row in var_df.iterrows():    
         frequencies.append(row['FREQ'])
         positions.append(row['POS'])
         nucs.append(row['ALLELE'])
-        print(row)
-        sys.exit(0)
-
+        if str(row['FLAGGED_POS']) == "False":   
+            flagged.append(False)
+        else:
+            flagged.append(True)
+        pos = int(row['POS'])
+        if row['ALLELE'] == reference_sequence[pos-1]:
+            reference.append(True)
+        else:
+            reference.append(False)
+        qualities.append(float(row['AVG_QUAL']))
+        depth.append(int(row['DEPTH']))
+    return(frequencies, nucs, positions, reference, flagged, depth, qualities)
+    
 def check_primer_binding(ambiguity_dict, primer_positions, primer_binding_issue):
     """
     Look for amplicons where (1) we have fluctuations in mutation frequency and (2) we have mutations in the primer binding region.
